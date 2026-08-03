@@ -7,8 +7,13 @@ const { admin, db } = require('../lib/firebase');
 const { asaas, PLANOS } = require('../lib/asaas');
 
 module.exports = async (req, res) => {
-  // O painel (moviki.com.br) chama isso do navegador — libera o CORS pra ele.
-  res.setHeader('Access-Control-Allow-Origin', 'https://moviki.com.br');
+  // O painel chama isso do navegador. Liberamos AS DUAS origens da empresa
+  // (site e app) durante e depois da migração pro subdomínio. Só ecoa de volta
+  // quando a origem está na lista — nunca '*', pra não abrir pra qualquer site.
+  const ORIGENS_PERMITIDAS = ['https://moviki.com.br', 'https://app.moviki.com.br'];
+  const origem = req.headers.origin;
+  if (ORIGENS_PERMITIDAS.includes(origem)) res.setHeader('Access-Control-Allow-Origin', origem);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(204).end();
