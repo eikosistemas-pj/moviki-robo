@@ -47,6 +47,18 @@ module.exports = async (req, res) => {
     const fatSnap = await fatRef.get();
     let asaasCustomerId = fatSnap.exists ? fatSnap.data().asaasCustomerId : null;
 
+    // Se ja havia um cliente salvo, confirma que ele AINDA existe no Asaas.
+    // Um cliente apagado ou de outro ambiente deixaria a assinatura falhar com
+    // "Cliente invalido". Se ele sumiu (404), zeramos pra recriar com o CPF atual.
+    if (asaasCustomerId) {
+      try {
+        await asaas('/customers/' + asaasCustomerId, 'GET');
+      } catch (e) {
+        if (e.status === 404) asaasCustomerId = null;
+        else throw e;
+      }
+    }
+
     if (!asaasCustomerId) {
       const cli = await asaas('/customers', 'POST', {
         name: nomeSeguro || email || ('Lojista ' + uid.slice(0, 6)),
