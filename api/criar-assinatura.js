@@ -34,6 +34,11 @@ module.exports = async (req, res) => {
       return res.status(400).json({ erro: 'Plano ou periodo invalido.' });
     }
     if (!cpfCnpj) return res.status(400).json({ erro: 'CPF ou CNPJ e obrigatorio.' });
+    const docNum = String(cpfCnpj).replace(/\D/g, '');
+    if (docNum.length !== 11 && docNum.length !== 14) {
+      return res.status(400).json({ erro: 'CPF ou CNPJ invalido.' });
+    }
+    const nomeSeguro = nome ? String(nome).slice(0, 120) : undefined;
     const cfg = PLANOS[plano][periodo];
 
     // 3) Cliente no Asaas: reaproveita se ja existe (guardado em faturamento/{uid},
@@ -44,8 +49,8 @@ module.exports = async (req, res) => {
 
     if (!asaasCustomerId) {
       const cli = await asaas('/customers', 'POST', {
-        name: nome || email || ('Lojista ' + uid.slice(0, 6)),
-        cpfCnpj: String(cpfCnpj).replace(/\D/g, ''),
+        name: nomeSeguro || email || ('Lojista ' + uid.slice(0, 6)),
+        cpfCnpj: docNum,
         email,
       });
       asaasCustomerId = cli.id;
@@ -87,7 +92,12 @@ module.exports = async (req, res) => {
 
     return res.status(200).json({ ok: true, invoiceUrl, subscriptionId: assin.id });
   } catch (e) {
-    const code = e.status && e.status < 500 ? 400 : 500;
-    return res.status(code).json({ erro: e.message || 'Erro ao criar assinatura' });
+    console.error('criar-assinatura erro:', e);
+    // Erros de validacao vindos do Asaas (4xx) sao seguros de mostrar ("CPF invalido" etc).
+    if (e.status && e.status < 500) {
+      return res.status(400).json({ erro: e.message || 'Nao foi possivel criar a assinatura.' });
+    }
+    // Erros internos: mensagem generica pro cliente, detalhe so no log do servidor.
+    return res.status(500).json({ erro: 'Erro ao criar a assinatura. Tente de novo em instantes.' });
   }
 };

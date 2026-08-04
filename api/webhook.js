@@ -5,6 +5,7 @@
 
 const { admin, db } = require('../lib/firebase');
 const { PLANOS } = require('../lib/asaas');
+const crypto = require('crypto');
 
 // Pagamento entrou -> liga o plano
 const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
@@ -16,10 +17,12 @@ module.exports = async (req, res) => {
 
   // 1) Confirma que a chamada veio MESMO do Asaas: o token que a gente configura
   //    no painel do Asaas vem no header abaixo. Sem ele bater, ignora.
-  const token = req.headers['asaas-access-token'];
-  if (!process.env.ASAAS_WEBHOOK_TOKEN || token !== process.env.ASAAS_WEBHOOK_TOKEN) {
-    return res.status(401).end();
-  }
+  // Comparacao em tempo constante pra nao vazar o token por medicao de tempo.
+  const token = String(req.headers['asaas-access-token'] || '');
+  const esperado = process.env.ASAAS_WEBHOOK_TOKEN || '';
+  const tBuf = Buffer.from(token), eBuf = Buffer.from(esperado);
+  const tokenOk = esperado.length > 0 && tBuf.length === eBuf.length && crypto.timingSafeEqual(tBuf, eBuf);
+  if (!tokenOk) return res.status(401).end();
 
   try {
     const evento = req.body || {};
