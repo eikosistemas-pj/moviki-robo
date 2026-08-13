@@ -1,14 +1,15 @@
 // api/upload-imagem.js  (repo: moviki-robo)
-// Recebe uma imagem (base64) do painel do lojista e sobe no provedor de imagens
-// (imgbb). Dois modos:
+// Recebe uma imagem (base64) do painel do lojista e sobe no Firebase Storage.
+// Dois modos:
 //   - tipo 'logo' (padrão): grava a URL em negocios/{uid}.markerLogo (logo do pino).
 //   - tipo 'produto': NÃO grava nada; só devolve a URL. Quem guarda a URL no item
 //     do cardápio é o painel, na hora de salvar (a foto vive dentro do array
 //     negocios/{uid}.cardapio, então não passa por aqui pra gravar).
-// Segurança: o idToken identifica o lojista; ele só mexe nos dados DELE. A chave
-// do provedor fica no servidor (env IMGBB_API_KEY), nunca no navegador.
+// Segurança: o idToken identifica o lojista; ele só mexe nos dados DELE.
+// O upload usa Admin SDK (service account) — bypassa regras do Storage/Firestore.
 //
-// Env necessária no Vercel (projeto moviki-robo): IMGBB_API_KEY
+// Env necessária no Vercel (projeto moviki-robo): FIREBASE_SERVICE_ACCOUNT
+// (IMGBB_API_KEY não é mais necessária — removida)
 
 const { db, admin } = require('../lib/firebase');
 
@@ -31,46 +32,41 @@ module.exports = async (req, res) => {
     if (!idToken || !imagemBase64) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
     if (imagemBase64.length > MAX_B64) { res.status(413).json({ ok: false, erro: 'imagem muito grande' }); return; }
 
-    // Quem e o lojista?
+    // Quem é o lojista?
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
-
-    const API_KEY = process.env.IMGBB_API_KEY;
-    if (!API_KEY) { res.status(200).json({ ok: false, motivo: 'sem_config' }); return; }
 
     // tira o prefixo "data:image/...;base64," se vier
     const b64 = imagemBase64.includes(',') ? imagemBase64.split(',').pop() : imagemBase64;
 
     const ehProduto = tipo === 'produto';
-    const nome = (ehProduto ? 'prod_' : 'logo_') + decoded.uid + '_' + Date.now();
+    const pasta = ehProduto ? 'produtos' : 'logos';
+    const fileName = `${pasta}/${decoded.uid}/${Date.now()}.jpg`;
 
-    const form = new URLSearchParams();
-    form.append('key', API_KEY);
-    form.append('image', b64);
-    form.append('name', nome);
+    // Upload para Firebase Storage via Admin SDK
+    const bucket = admin.storage().bucket();
+    const buffer = Buffer.from(b64, 'base64');
+    const file = bucket.file(fileName);
 
-    const r = await fetch('https://api.imgbb.com/1/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
+    await file.save(buffer, {
+      metadata: {
+        contentType: 'image/jpeg',
+        cacheControl: 'public,max-age=31536000', // 1 ano
+      },
+      public: true, // torna o arquivo público (qualquer um com a URL acessa)
     });
-    const j = await r.json().catch(() => null);
-    if (!r.ok || !j || !j.success || !j.data) {
-      console.error('imgbb erro:', r.status, j && j.error);
-      res.status(502).json({ ok: false, erro: 'falha no upload' });
-      return;
-    }
 
-    const url = j.data.url || j.data.display_url;
+    // URL pública do Firebase Storage
+    const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileName)}?alt=media`;
 
     if (ehProduto) {
-      // foto de produto: so devolve a URL (o painel guarda dentro do cardapio ao salvar)
+      // foto de produto: só devolve a URL (o painel guarda dentro do cardapio ao salvar)
       res.status(200).json({ ok: true, url });
       return;
     }
 
-    // logo do pino: grava no doc do proprio lojista (Admin SDK -- nao depende das regras)
+    // logo do pino: grava no doc do próprio lojista (Admin SDK -- não depende das regras)
     await db.collection('negocios').doc(decoded.uid).set({ markerLogo: url }, { merge: true });
     res.status(200).json({ ok: true, url });
   } catch (e) {
