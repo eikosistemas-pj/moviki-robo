@@ -15,6 +15,8 @@ const { db, admin } = require('../lib/firebase');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const MAX_B64 = 2800000; // ~2 MB de base64 (imagem já vem comprimida do navegador)
+// Bucket explícito do projeto (evita auto-detecção falhar)
+const STORAGE_BUCKET = 'moviki-app.firebasestorage.app';
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', ORIGIN_OK);
@@ -44,8 +46,8 @@ module.exports = async (req, res) => {
     const pasta = ehProduto ? 'produtos' : 'logos';
     const fileName = `${pasta}/${decoded.uid}/${Date.now()}.jpg`;
 
-    // Upload para Firebase Storage via Admin SDK
-    const bucket = admin.storage().bucket();
+    // Upload para Firebase Storage via Admin SDK — bucket EXPLÍCITO
+    const bucket = admin.storage().bucket(STORAGE_BUCKET);
     const buffer = Buffer.from(b64, 'base64');
     const file = bucket.file(fileName);
 
@@ -57,8 +59,8 @@ module.exports = async (req, res) => {
       public: true, // torna o arquivo público (qualquer um com a URL acessa)
     });
 
-    // URL pública do Firebase Storage
-    const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileName)}?alt=media`;
+    // URL pública do Firebase Storage (formato compatível com CSP das páginas)
+    const url = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket.name)}/o/${encodeURIComponent(fileName)}?alt=media`;
 
     if (ehProduto) {
       // foto de produto: só devolve a URL (o painel guarda dentro do cardapio ao salvar)
@@ -70,7 +72,19 @@ module.exports = async (req, res) => {
     await db.collection('negocios').doc(decoded.uid).set({ markerLogo: url }, { merge: true });
     res.status(200).json({ ok: true, url });
   } catch (e) {
-    console.error('upload-imagem erro:', e);
-    res.status(500).json({ ok: false, erro: 'erro interno' });
+    // Log detalhado pra aparecer no console do Vercel (Settings → Functions → View Logs)
+    const msg = e?.message || String(e);
+    const code = e?.code || 'UNKNOWN';
+    console.error('upload-imagem ERRO:', { code, message: msg, stack: e?.stack });
+    // Resposta amigável pro painel
+    if (code === 'PERMISSION_DENIED' || msg.includes('permission')) {
+      res.status(500).json({ ok: false, erro: 'sem permissão no Storage (verifique role Storage Admin no service account)', motivo: 'perm_storage' });
+    } else if (code === 'FAILED_PRECONDITION' || msg.includes('billing') || msg.includes('Blaze')) {
+      res.status(500).json({ ok: false, erro: 'Firebase Storage requer plano Blaze ativo', motivo: 'sem_blaze' });
+    } else if (code === 'NOT_FOUND' || msg.includes('bucket')) {
+      res.status(500).json({ ok: false, erro: 'bucket não encontrado (confira nome: moviki-app.firebasestorage.app)', motivo: 'bucket_nao_existe' });
+    } else {
+      res.status(500).json({ ok: false, erro: 'erro interno no upload', detalhe: msg });
+    }
   }
 };
