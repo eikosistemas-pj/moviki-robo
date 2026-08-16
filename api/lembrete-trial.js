@@ -1,23 +1,16 @@
 // api/lembrete-trial.js  (repo: moviki-robo)
-// ROBÔ DE CONVERSÃO DO TRIAL — roda 1x por dia (agendado no vercel.json).
-// Procura os testes grátis (assinaturas com periodo:'trial') que estão chegando
-// ao fim e manda um e-mail cordial convidando o lojista a assinar.
+// ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
+// Avisa por e-mail quem está pra perder acesso:
+//   • TESTE grátis (periodo:'trial') chegando ao fim -> convida a assinar
+//        d7 (~7 dias), d2 (~2 dias), fim (venceu) — 1 vez cada na vida do teste
+//   • PLANO PAGO chegando ao vencimento -> lembra de garantir o pagamento
+//        1 aviso por ciclo, quando faltam <=5 dias; reavisa a cada novo vencimento.
+//        (No cartão a renovação é automática; a mensagem é neutra e serve p/ Pix/boleto.)
+// A marca de "já enviei" fica em assinaturas/{uid}.lembretes (Admin SDK -> não passa
+// pelas regras do Firestore).
 //
-// Manda no máximo 3 e-mails na vida de cada teste, e nunca repete:
-//   • faltando ~7 dias  -> aviso "está terminando"      (flag: d7)
-//   • faltando ~2 dias  -> aviso "faltam poucos dias"   (flag: d2)
-//   • depois de vencer  -> aviso "terminou, reative"    (flag: fim)
-// A marca de "já enviei" fica em assinaturas/{uid}.lembretes (gravada pelo
-// Admin SDK, então NÃO passa pelas regras do Firestore e não precisa mexer nelas).
-//
-// Segurança: só roda com o segredo certo. O agendador do Vercel manda o segredo
-// no cabeçalho Authorization automaticamente (variável de ambiente CRON_SECRET).
-// Dá pra abrir no navegador com ?secret=...&dry=1 pra SIMULAR (nunca envia).
-//
-// Env vars necessárias no Vercel (projeto moviki-robo):
-//   CRON_SECRET     -> um segredo qualquer (inventado por você) que protege o robô
-//   RESEND_API_KEY  -> a mesma chave do provedor de e-mail que já usamos
-//   FIREBASE_SERVICE_ACCOUNT -> (já existe)
+// Env no Vercel (moviki-robo): CRON_SECRET, RESEND_API_KEY, FIREBASE_SERVICE_ACCOUNT.
+// Testar no navegador (simula, nunca envia): ?secret=...&dry=1
 
 const { admin, db } = require('../lib/firebase');
 
@@ -37,18 +30,18 @@ module.exports = async (req, res) => {
     if (!secret) { res.status(200).json({ ok: false, motivo: 'sem_config_CRON_SECRET' }); return; }
 
     const q = req.query || {};
-    const viaCabecalho = req.headers.authorization === 'Bearer ' + secret; // é o agendador do Vercel
-    const viaQuery     = String(q.secret || '') === secret;                // é você testando no navegador
+    const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
+    const viaQuery     = String(q.secret || '') === secret;
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
-    // Só envia de verdade quando vem do agendador. Query/navegador = sempre simulação (seguro).
     const enviarDeVerdade = viaCabecalho && String(q.dry || '') !== '1';
 
     const API_KEY = process.env.RESEND_API_KEY;
     if (enviarDeVerdade && !API_KEY) { res.status(200).json({ ok: false, motivo: 'sem_RESEND_API_KEY' }); return; }
 
     const agora = Date.now();
-    const snap = await db.collection('assinaturas').where('periodo', '==', 'trial').get();
+    // Todas as assinaturas; separa trial x pago no loop.
+    const snap = await db.collection('assinaturas').get();
 
     const resultado = { simulacao: !enviarDeVerdade, analisados: 0, enviados: 0, pulados: 0, detalhes: [] };
 
@@ -57,20 +50,25 @@ module.exports = async (req, res) => {
       const uid = docu.id;
       resultado.analisados++;
 
-      // Guardas: precisa estar ativo e ter data de vencimento.
       if (d.ativo !== true || !d.vence_em || typeof d.vence_em.toMillis !== 'function') { resultado.pulados++; continue; }
 
       const dias = Math.ceil((d.vence_em.toMillis() - agora) / DIA_MS);
       const lembretes = d.lembretes || {};
+      const ehTrial = d.periodo === 'trial';
 
-      // Qual aviso cabe agora? (o mais urgente aplicável, um por dia no máximo)
+      // Qual aviso cabe agora?
       let flag = null;
-      if (dias <= 0 && !lembretes.fim)               flag = 'fim';
-      else if (dias >= 1 && dias <= 2 && !lembretes.d2) flag = 'd2';
-      else if (dias >= 3 && dias <= 7 && !lembretes.d7) flag = 'd7';
+      if (ehTrial) {
+        if (dias <= 0 && !lembretes.fim)                  flag = 'fim';
+        else if (dias >= 1 && dias <= 2 && !lembretes.d2) flag = 'd2';
+        else if (dias >= 3 && dias <= 7 && !lembretes.d7) flag = 'd7';
+      } else {
+        // plano pago: 1 aviso por ciclo, reavisa quando o vencimento muda.
+        const venceId = String(d.vence_em.toMillis());
+        if (dias >= 0 && dias <= 5 && lembretes.pagoVence !== venceId) flag = 'pago';
+      }
       if (!flag) { resultado.pulados++; continue; }
 
-      // Pega o e-mail (fica no cadastro de acesso) e o nome do negócio.
       let email = '';
       try { const u = await admin.auth().getUser(uid); email = String(u.email || '').trim(); } catch (_) {}
       if (!email) { resultado.pulados++; resultado.detalhes.push({ uid, flag, status: 'sem_email' }); continue; }
@@ -78,7 +76,7 @@ module.exports = async (req, res) => {
       let nome = 'Olá';
       try { const n = await db.collection('negocios').doc(uid).get(); if (n.exists && n.data().nome) nome = String(n.data().nome).trim(); } catch (_) {}
 
-      const dic = Math.max(dias, 0); // dias exibidos nunca negativos
+      const dic = Math.max(dias, 0);
       const msg = montarEmail(flag, nome, dic);
 
       if (!enviarDeVerdade) {
@@ -98,8 +96,14 @@ module.exports = async (req, res) => {
           resultado.detalhes.push({ uid, flag, status: 'falha_envio' });
           continue;
         }
-        // Marca como enviado (Admin SDK — não passa pelas regras do cliente).
-        await docu.ref.update({ ['lembretes.' + flag]: admin.firestore.FieldValue.serverTimestamp() });
+        if (flag === 'pago') {
+          await docu.ref.update({
+            'lembretes.pagoVence': String(d.vence_em.toMillis()),
+            'lembretes.pagoEm': admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          await docu.ref.update({ ['lembretes.' + flag]: admin.firestore.FieldValue.serverTimestamp() });
+        }
         resultado.enviados++;
         resultado.detalhes.push({ uid, flag, status: 'enviado' });
       } catch (e) {
@@ -110,12 +114,11 @@ module.exports = async (req, res) => {
 
     res.status(200).json({ ok: true, ...resultado });
   } catch (e) {
-    console.error('lembrete-trial erro:', e);
+    console.error('lembrete erro:', e);
     res.status(500).json({ ok: false, erro: 'erro interno' });
   }
 };
 
-// Esconde o meio do e-mail nos relatórios de simulação (ex.: jo***@gmail.com)
 function mascara(e) {
   const [u, dom] = String(e).split('@'); if (!dom) return '***';
   return (u.slice(0, 2) + '***') + '@' + dom;
@@ -123,6 +126,8 @@ function mascara(e) {
 
 function montarEmail(tipo, nome, dias) {
   let subject, titulo, chamada;
+  const pago = tipo === 'pago';
+
   if (tipo === 'fim') {
     subject = 'Seu teste do Moviki terminou — reative em 1 minuto';
     titulo  = 'Seu teste grátis terminou';
@@ -131,17 +136,29 @@ function montarEmail(tipo, nome, dias) {
     subject = 'Faltam poucos dias no seu teste do Moviki';
     titulo  = 'Faltam só ' + dias + (dias === 1 ? ' dia' : ' dias') + ' de teste';
     chamada = 'Seu teste grátis está acabando. Assine agora pra não perder seu espaço no mapa nem o que você já montou.';
-  } else { // d7
+  } else if (tipo === 'd7') {
     subject = 'Seu teste do Moviki está terminando';
     titulo  = 'Seu teste grátis está terminando';
     chamada = 'Faltam poucos dias pro seu teste acabar. Que tal garantir seu lugar no mapa e continuar aparecendo pros clientes?';
+  } else { // pago
+    subject = 'Sua assinatura do Moviki está pra vencer';
+    titulo  = 'Sua mensalidade vence em ' + dias + (dias === 1 ? ' dia' : ' dias');
+    chamada = 'Se você paga por Pix ou boleto, fique de olho no e-mail de cobrança pra continuar no ar sem interrupção. Se paga no cartão, pode relaxar: a renovação é automática.';
   }
 
-  const bullets = [
+  const bullets = pago ? [
+    'Seu <b>cardápio</b>, <b>promoções</b> e <b>eventos</b> continuam no ar',
+    'Você segue aparecendo no <b>mapa</b> pros clientes te acharem',
+    'Sem interrupção: pague a cobrança e nada muda pros seus clientes',
+  ] : [
     'Seu <b>cardápio</b>, <b>promoções</b> e <b>eventos</b> seguem no ar',
     'Você continua aparecendo no <b>mapa</b> pros clientes te acharem',
     'No <b>Premium</b>, sua <b>logo aparece no seu pino do mapa</b> — muito mais destaque',
   ];
+
+  const ctaTexto = pago ? 'Acessar meu painel →' : 'Assinar agora →';
+  const linhaPreco = pago ? '' :
+    `<p style="margin:0 0 22px;font-size:13px;color:#64748b;text-align:center">Premium por R$ 49,90/mês (com sua logo no mapa) · ou Pró por R$ 37,90/mês.</p>`;
 
   const html = `<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -170,11 +187,11 @@ function montarEmail(tipo, nome, dias) {
 
           <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 22px">
             <tr><td style="border-radius:11px;background:linear-gradient(135deg,#0066FF,#0aa2c8)">
-              <a href="${PAINEL_URL}" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none">Assinar agora →</a>
+              <a href="${PAINEL_URL}" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none">${ctaTexto}</a>
             </td></tr>
           </table>
 
-          <p style="margin:0 0 22px;font-size:13px;color:#64748b;text-align:center">Premium por R$ 49,90/mês (com sua logo no mapa) · ou Pró por R$ 37,90/mês.</p>
+          ${linhaPreco}
 
           <p style="margin:0 0 6px;font-size:14px;color:#64748b">Qualquer dúvida, é só chamar a gente no WhatsApp:</p>
           <p style="margin:0 0 24px;font-size:15px"><a href="${WPP_LINK}" style="color:#16a34a;font-weight:bold;text-decoration:none">${WPP_TEXTO}</a></p>
@@ -191,23 +208,17 @@ function montarEmail(tipo, nome, dias) {
 </body></html>`;
 
   const text = [
-    'Olá, ' + nome + '!',
-    '',
-    titulo + '.',
-    chamada,
-    '',
-    'Assinando você mantém:',
+    'Olá, ' + nome + '!', '', titulo + '.', chamada, '',
+    (pago ? 'Mantendo sua assinatura em dia:' : 'Assinando você mantém:'),
     '- Seu cardápio, promoções e eventos no ar',
     '- Sua presença no mapa pros clientes te acharem',
-    '- No Premium, sua logo aparece no seu pino do mapa (mais destaque)',
+    (pago ? '- Sem interrupção pros seus clientes' : '- No Premium, sua logo aparece no seu pino do mapa (mais destaque)'),
     '',
-    'Assine agora: ' + PAINEL_URL,
-    'Premium R$ 49,90/mês (com logo no mapa) ou Pró R$ 37,90/mês.',
+    (pago ? 'Acessar meu painel: ' : 'Assine agora: ') + PAINEL_URL,
+    (pago ? '' : 'Premium R$ 49,90/mês (com logo no mapa) ou Pró R$ 37,90/mês.'),
     '',
     'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')',
-    '',
-    'Equipe Moviki',
-    'O mapa inteligente dos negócios em movimento.',
+    '', 'Equipe Moviki', 'O mapa inteligente dos negócios em movimento.',
   ].join('\n');
 
   return { subject, html, text };
