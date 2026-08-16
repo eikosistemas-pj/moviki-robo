@@ -1,37 +1,25 @@
 // api/pontos.js  (repo: moviki-robo)
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
-// Cada ponto extra = um "carrinho" do mesmo dono, com localização e apelido
-// próprios (a marca/cardápio vêm do negócio principal). Como o ponto extra
-// mexe em dinheiro (cobrança), TUDO passa por aqui (Admin SDK) — o cliente
-// nunca escreve ponto direto no banco. As regras do Firestore têm pontos e
-// ponto_slugs como write:false justamente por isso.
-//
-// Contagem: o negócio principal (negocios/{uid}) já É 1 ponto. Então dos 3
-// inclusos no plano, sobram 2 na subcoleção sem cobrança. O 3º adicional
-// (4º no total) exige a cobrança de R$19,90 — isso entra na PARTE A2; por
-// enquanto este endpoint recusa o ponto extra com motivo 'precisa_cobranca'.
-//
-// Env necessária no Vercel (projeto moviki-robo): FIREBASE_SERVICE_ACCOUNT
+// O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
+// cobrança. O 3º adicional (4º no total) cria uma assinatura recorrente de
+// R$19,90 (PONTO_EXTRA) e só fica ATIVO quando o pagamento confirmar (webhook).
+// Remover um ponto pago cancela a assinatura. Tudo via Admin SDK (regras write:false).
 //
 // Ações (POST body.acao): 'listar' | 'criar' | 'editar' | 'remover'
 
 const { db, admin } = require('../lib/firebase');
-const { PONTOS_INCLUSOS } = require('../lib/asaas');
+const { asaas, PONTO_EXTRA, PONTOS_INCLUSOS } = require('../lib/asaas');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
+const GKEY = process.env.GOOGLE_MAPS_KEY; // autocomplete de endereço (Google Places)
 const FieldValue = admin.firestore.FieldValue;
-
-// o principal já ocupa 1 dos inclusos → quantos pontos EXTRAS cabem sem cobrança
-const EXTRAS_INCLUSOS = Math.max(0, PONTOS_INCLUSOS - 1);
+const EXTRAS_INCLUSOS = Math.max(0, PONTOS_INCLUSOS - 1); // principal ocupa 1
 
 function limpaSlug(s) {
   return String(s || '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // tira acento
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '')                      // só a-z 0-9 _ -
-    .slice(0, 40);
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
 }
-
 function ehNum(v) { return typeof v === 'number' && isFinite(v); }
 
 async function ehEnterprise(uid) {
@@ -39,6 +27,16 @@ async function ehEnterprise(uid) {
   const d = a.exists ? a.data() : null;
   const venceOk = !d || !d.vence_em || (d.vence_em.toMillis && d.vence_em.toMillis() > Date.now());
   return !!(d && d.ativo === true && d.plano === 'enterprise' && venceOk);
+}
+
+async function pegarInvoiceUrl(subId) {
+  let url = null;
+  for (let i = 0; i < 3 && !url; i++) {
+    const pays = await asaas('/subscriptions/' + subId + '/payments', 'GET');
+    if (pays.data && pays.data[0]) url = pays.data[0].invoiceUrl;
+    else await new Promise((r) => setTimeout(r, 1500));
+  }
+  return url;
 }
 
 module.exports = async (req, res) => {
@@ -55,13 +53,11 @@ module.exports = async (req, res) => {
     const acao = String(body.acao || '');
     if (!idToken) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
 
-    // quem é o dono?
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
     const uid = decoded.uid;
 
-    // trava: só Enterprise ativo mexe em pontos
     if (!(await ehEnterprise(uid))) {
       res.status(403).json({ ok: false, erro: 'recurso do plano Enterprise', motivo: 'nao_enterprise' });
       return;
@@ -69,36 +65,69 @@ module.exports = async (req, res) => {
 
     const col = db.collection('pontos');
 
-    // ---- LISTAR ----
     if (acao === 'listar') {
       const qs = await col.where('ownerUid', '==', uid).get();
       const pontos = qs.docs.map(d => {
         const x = d.data();
-        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', ativo: x.ativo === true };
+        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
       });
       res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
       return;
     }
 
-    // ---- CRIAR ----
+    // ---- AUTOCOMPLETE DE ENDEREÇO (Google Places New) ----
+    if (acao === 'sugestoes') {
+      if (!GKEY) { res.status(500).json({ ok: false, erro: 'busca de lugares não configurada' }); return; }
+      const texto = String(body.texto || '').trim().slice(0, 120);
+      if (texto.length < 3) { res.status(200).json({ ok: true, sugestoes: [] }); return; }
+      const r = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GKEY },
+        body: JSON.stringify({ input: texto, languageCode: 'pt-BR', includedRegionCodes: ['br'] }),
+      });
+      const j = await r.json().catch(() => ({}));
+      const sugestoes = ((j.suggestions) || [])
+        .map(s => s.placePrediction).filter(Boolean)
+        .map(p => ({ id: p.placeId, texto: (p.text && p.text.text) || '' }))
+        .filter(x => x.id && x.texto).slice(0, 6);
+      res.status(200).json({ ok: true, sugestoes });
+      return;
+    }
+    if (acao === 'detalhe') {
+      if (!GKEY) { res.status(500).json({ ok: false, erro: 'busca de lugares não configurada' }); return; }
+      const placeId = String(body.placeId || '').slice(0, 300);
+      if (!placeId) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
+      const r = await fetch('https://places.googleapis.com/v1/places/' + encodeURIComponent(placeId) + '?languageCode=pt-BR', {
+        headers: { 'X-Goog-Api-Key': GKEY, 'X-Goog-FieldMask': 'location,formattedAddress' },
+      });
+      const j = await r.json().catch(() => ({}));
+      const loc = j.location || {};
+      if (typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') { res.status(200).json({ ok: false, erro: 'lugar_sem_local' }); return; }
+      res.status(200).json({ ok: true, lat: loc.latitude, lng: loc.longitude, endereco: j.formattedAddress || '' });
+      return;
+    }
+
     if (acao === 'criar') {
       const nome = String(body.nome || '').trim().slice(0, 80);
       const slug = limpaSlug(body.slug);
       const lat = Number(body.lat), lng = Number(body.lng);
-      if (!nome)                 { res.status(400).json({ ok: false, erro: 'informe o nome do ponto' }); return; }
-      if (slug.length < 3)       { res.status(400).json({ ok: false, erro: 'apelido precisa de ao menos 3 letras' }); return; }
+      if (!nome)                      { res.status(400).json({ ok: false, erro: 'informe o nome do ponto' }); return; }
+      if (slug.length < 3)            { res.status(400).json({ ok: false, erro: 'apelido precisa de ao menos 3 letras' }); return; }
       if (!ehNum(lat) || !ehNum(lng)) { res.status(400).json({ ok: false, erro: 'marque a localização do ponto' }); return; }
 
-      // quantos pontos extras o dono já tem?
       const jaTem = (await col.where('ownerUid', '==', uid).get()).size;
-      if (jaTem >= EXTRAS_INCLUSOS) {
-        // 4º ponto (total) em diante = cobrança de R$19,90 → PARTE A2
-        res.status(402).json({ ok: false, erro: 'ponto extra exige a mensalidade de R$19,90', motivo: 'precisa_cobranca' });
-        return;
+      const extra = jaTem >= EXTRAS_INCLUSOS;
+
+      let customerId = null;
+      if (extra) {
+        const fat = await db.collection('faturamento').doc(uid).get();
+        customerId = fat.exists ? fat.data().asaasCustomerId : null;
+        if (!customerId) {
+          res.status(400).json({ ok: false, erro: 'Assine o Enterprise pra liberar pontos extras.', motivo: 'sem_cliente' });
+          return;
+        }
       }
 
-      // reserva do apelido + criação do ponto, atômico (não pode colidir com
-      // apelido de lojista nem de outro ponto)
       let pid = '';
       try {
         await db.runTransaction(async (tx) => {
@@ -108,7 +137,7 @@ module.exports = async (req, res) => {
           if (sp.exists || sl.exists) throw new Error('APELIDO_EM_USO');
           const ref = col.doc();
           tx.set(ref, {
-            ownerUid: uid, nome, lat, lng, slug, ativo: true,
+            ownerUid: uid, nome, lat, lng, slug, ativo: !extra,
             criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp(),
           });
           tx.set(refP, { ownerUid: uid, pid: ref.id });
@@ -121,11 +150,32 @@ module.exports = async (req, res) => {
         }
         throw e;
       }
-      res.status(200).json({ ok: true, id: pid, ativo: true });
+
+      if (!extra) { res.status(200).json({ ok: true, id: pid, ativo: true }); return; }
+
+      try {
+        const hoje = new Date().toISOString().slice(0, 10);
+        const assin = await asaas('/subscriptions', 'POST', {
+          customer: customerId,
+          billingType: 'UNDEFINED',
+          value: PONTO_EXTRA.value,
+          nextDueDate: hoje,
+          cycle: PONTO_EXTRA.cycle,
+          description: 'Moviki - ponto extra (' + slug + ')',
+          externalReference: 'ponto:' + pid,
+        });
+        await col.doc(pid).update({ cobrancaId: assin.id, atualizadoEm: FieldValue.serverTimestamp() });
+        const invoiceUrl = await pegarInvoiceUrl(assin.id);
+        res.status(200).json({ ok: true, id: pid, ativo: false, cobranca: true, invoiceUrl });
+      } catch (e) {
+        try { await col.doc(pid).delete(); } catch (_) {}
+        try { await db.collection('ponto_slugs').doc(slug).delete(); } catch (_) {}
+        console.error('cobranca ponto erro:', e?.message || e);
+        res.status(502).json({ ok: false, erro: 'Não consegui gerar a cobrança do ponto. Tente de novo.' });
+      }
       return;
     }
 
-    // ---- EDITAR (nome/localização; apelido é imutável) ----
     if (acao === 'editar') {
       const pid = String(body.pid || '');
       if (!pid) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
@@ -149,18 +199,16 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // ---- REMOVER ----
     if (acao === 'remover') {
       const pid = String(body.pid || '');
       if (!pid) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
       const ref = col.doc(pid);
       const snap = await ref.get();
       if (!snap.exists || snap.data().ownerUid !== uid) { res.status(404).json({ ok: false, erro: 'ponto não encontrado' }); return; }
-      const slug = snap.data().slug;
-      // PARTE A2: se o ponto tiver cobrança (cobrancaId), cancelar a assinatura
-      // no Asaas ANTES de apagar. (Nenhum ponto tem cobrança nesta fase.)
+      const d = snap.data();
+      if (d.cobrancaId) { try { await asaas('/subscriptions/' + d.cobrancaId, 'DELETE'); } catch (_) {} }
       await ref.delete();
-      if (slug) { try { await db.collection('ponto_slugs').doc(slug).delete(); } catch (_) {} }
+      if (d.slug) { try { await db.collection('ponto_slugs').doc(d.slug).delete(); } catch (_) {} }
       res.status(200).json({ ok: true });
       return;
     }
