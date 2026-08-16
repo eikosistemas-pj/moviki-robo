@@ -134,6 +134,23 @@ module.exports = async (req, res) => {
     const pay = evento.payment || {};
     const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
 
+    // Ponto extra do Enterprise: externalReference = "ponto:<pid>".
+    // Liga/desliga só o ponto (pontos/{pid}.ativo) — NÃO mexe em plano nem comissão.
+    if (typeof uid === 'string' && uid.startsWith('ponto:')) {
+      const pid = uid.slice(6);
+      if (!pid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
+        return res.status(200).json({ ok: true, ignorado: true });
+      }
+      const ativo = LIGA.includes(tipo);
+      try {
+        await db.collection('pontos').doc(pid).set({
+          ativo,
+          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      } catch (e) { console.error('ponto webhook erro:', e); return res.status(500).json({ erro: e.message }); }
+      return res.status(200).json({ ok: true, ponto: pid, ativo });
+    }
+
     // Evento que nao interessa ou sem uid: responde OK e ignora.
     if (!uid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
       return res.status(200).json({ ok: true, ignorado: true });
