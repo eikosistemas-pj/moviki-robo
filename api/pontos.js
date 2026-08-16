@@ -69,7 +69,7 @@ module.exports = async (req, res) => {
       const qs = await col.where('ownerUid', '==', uid).get();
       const pontos = qs.docs.map(d => {
         const x = d.data();
-        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
+        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
       });
       res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
       return;
@@ -115,6 +115,7 @@ module.exports = async (req, res) => {
       if (slug.length < 3)            { res.status(400).json({ ok: false, erro: 'apelido precisa de ao menos 3 letras' }); return; }
       if (!ehNum(lat) || !ehNum(lng)) { res.status(400).json({ ok: false, erro: 'marque a localização do ponto' }); return; }
 
+      const horario = String(body.horario || '').trim().slice(0, 60);
       const jaTem = (await col.where('ownerUid', '==', uid).get()).size;
       const extra = jaTem >= EXTRAS_INCLUSOS;
 
@@ -137,7 +138,7 @@ module.exports = async (req, res) => {
           if (sp.exists || sl.exists) throw new Error('APELIDO_EM_USO');
           const ref = col.doc();
           tx.set(ref, {
-            ownerUid: uid, nome, lat, lng, slug, ativo: !extra,
+            ownerUid: uid, nome, lat, lng, slug, horario, ativo: !extra,
             criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp(),
           });
           tx.set(refP, { ownerUid: uid, pid: ref.id });
@@ -194,6 +195,7 @@ module.exports = async (req, res) => {
         if (!ehNum(lat) || !ehNum(lng)) { res.status(400).json({ ok: false, erro: 'localização inválida' }); return; }
         patch.lat = lat; patch.lng = lng;
       }
+      if (body.horario !== undefined) { patch.horario = String(body.horario || '').trim().slice(0, 60); }
       await ref.update(patch);
       res.status(200).json({ ok: true });
       return;
