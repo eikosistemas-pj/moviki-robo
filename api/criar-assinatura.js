@@ -38,6 +38,18 @@ module.exports = async (req, res) => {
     if (docNum.length !== 11 && docNum.length !== 14) {
       return res.status(400).json({ erro: 'CPF ou CNPJ invalido.' });
     }
+    // Trava: se o lojista JA tem plano ativo, nao deixa reassinar (evitaria
+    // cobranca duplicada no Asaas e derrubaria o acesso pra 'pendente'). A
+    // renovacao e automatica (assinatura recorrente). Trocar de plano = suporte.
+    try {
+      const jaSnap = await db.collection('assinaturas').doc(uid).get();
+      const ja = jaSnap.exists ? jaSnap.data() : null;
+      const ativoOk = ja && ja.ativo === true && (!ja.vence_em || (ja.vence_em.toMillis && ja.vence_em.toMillis() > Date.now()));
+      if (ativoOk) {
+        return res.status(409).json({ erro: 'Voce ja tem um plano ativo — ele renova sozinho. Para trocar de plano, fale com a gente.', motivo: 'ja_ativo' });
+      }
+    } catch (_) {}
+
     const nomeSeguro = nome ? String(nome).slice(0, 120) : undefined;
     const cfg = PLANOS[plano][periodo];
 
