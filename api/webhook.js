@@ -12,6 +12,12 @@ const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
 // Venceu / apagado / estornado / chargeback -> desliga (cai pra Basico)
 const DESLIGA = ['PAYMENT_OVERDUE', 'PAYMENT_DELETED', 'PAYMENT_REFUNDED', 'PAYMENT_CHARGEBACK_REQUESTED'];
 
+// Janela de retenção da comissão: quantos dias a comissão fica "retida" antes
+// de liberar pra saque. Cobre o arrependimento de 7 dias (CDC) — se o lojista
+// pedir reembolso nesse período, o clawback zera a comissão ANTES de virar saque.
+// Pode aumentar (ex.: 14) pra folga extra contra chargeback.
+const DIAS_RETENCAO_COMISSAO = 7;
+
 // ==========================================================
 //  PROGRAMA DE PARCEIROS — cálculo de comissão
 //  N1 = 15% recorrente (todo pagamento). N2 = 7,5% e N3 = 5%
@@ -52,6 +58,8 @@ async function creditarComissao(o) {
       pago: false,
       estornada: false,
       criadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      // A comissão só entra no "disponível para saque" depois desta data.
+      liberaEm: admin.firestore.Timestamp.fromMillis(Date.now() + DIAS_RETENCAO_COMISSAO * 86400000),
     });
   } catch (e) { /* já existe (reenvio do Asaas) -> ignora */ }
 }
