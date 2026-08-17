@@ -52,6 +52,9 @@ module.exports = async (req, res) => {
       if (c.pago || c.estornada) return;
       const cMs = (c.criadoEm && typeof c.criadoEm.toMillis === 'function') ? c.criadoEm.toMillis() : null;
       if (limiteMs && cMs && cMs > limiteMs) return;
+      // Comissão ainda em retenção quando o saque foi pedido não entra (liberaEm ausente = já liberada).
+      const libMs = (c.liberaEm && typeof c.liberaEm.toMillis === 'function') ? c.liberaEm.toMillis() : null;
+      if (limiteMs && libMs && libMs > limiteMs) return;
       batch.update(d.ref, {
         pago: true,
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
