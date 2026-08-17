@@ -192,6 +192,29 @@ module.exports = async (req, res) => {
       const ref = col.doc(pid);
       const snap = await ref.get();
       if (!snap.exists || snap.data().ownerUid !== uid) { res.status(404).json({ ok: false, erro: 'ponto não encontrado' }); return; }
+      const atual = snap.data();
+
+      // Troca de apelido (opcional): move a reserva do link com segurança.
+      if (body.slug !== undefined) {
+        const novoSlug = limpaSlug(body.slug);
+        if (novoSlug.length < 3) { res.status(400).json({ ok: false, erro: 'apelido precisa de ao menos 3 letras' }); return; }
+        if (novoSlug !== atual.slug) {
+          try {
+            await db.runTransaction(async (tx) => {
+              const refNovoP = db.collection('ponto_slugs').doc(novoSlug);
+              const refNovoL = db.collection('slugs').doc(novoSlug);
+              const [np, nl] = await Promise.all([tx.get(refNovoP), tx.get(refNovoL)]);
+              if (np.exists || nl.exists) throw new Error('APELIDO_EM_USO');
+              tx.set(refNovoP, { ownerUid: uid, pid });
+              if (atual.slug) tx.delete(db.collection('ponto_slugs').doc(atual.slug));
+              tx.update(ref, { slug: novoSlug, atualizadoEm: FieldValue.serverTimestamp() });
+            });
+          } catch (e) {
+            if (String(e.message).includes('APELIDO_EM_USO')) { res.status(409).json({ ok: false, erro: 'esse apelido já está em uso', motivo: 'apelido_em_uso' }); return; }
+            throw e;
+          }
+        }
+      }
 
       const patch = { atualizadoEm: FieldValue.serverTimestamp() };
       if (body.nome !== undefined) {
