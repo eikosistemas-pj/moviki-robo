@@ -21,6 +21,14 @@ function limpaSlug(s) {
     .toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
 }
 function ehNum(v) { return typeof v === 'number' && isFinite(v); }
+function limpaHorarioCfg(c){
+  if (!c || typeof c !== 'object') return null;
+  const dias = Array.isArray(c.dias) ? c.dias.filter(d => Number.isInteger(d) && d >= 0 && d <= 6).slice(0, 7) : [];
+  const hhmm = (s) => (typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s)) ? s : null;
+  const abre = hhmm(c.abre), fecha = hhmm(c.fecha);
+  if (!dias.length && !abre && !fecha) return null;
+  return { dias, abre: abre || '', fecha: fecha || '' };
+}
 
 async function ehEnterprise(uid) {
   const a = await db.collection('assinaturas').doc(uid).get();
@@ -69,7 +77,7 @@ module.exports = async (req, res) => {
       const qs = await col.where('ownerUid', '==', uid).get();
       const pontos = qs.docs.map(d => {
         const x = d.data();
-        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
+        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', horarioCfg: x.horarioCfg || null, ativo: x.ativo === true, cobranca: !!x.cobrancaId };
       });
       res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
       return;
@@ -116,6 +124,7 @@ module.exports = async (req, res) => {
       if (!ehNum(lat) || !ehNum(lng)) { res.status(400).json({ ok: false, erro: 'marque a localização do ponto' }); return; }
 
       const horario = String(body.horario || '').trim().slice(0, 60);
+      const horarioCfg = limpaHorarioCfg(body.horarioCfg);
       const jaTem = (await col.where('ownerUid', '==', uid).get()).size;
       const extra = jaTem >= EXTRAS_INCLUSOS;
 
@@ -138,7 +147,7 @@ module.exports = async (req, res) => {
           if (sp.exists || sl.exists) throw new Error('APELIDO_EM_USO');
           const ref = col.doc();
           tx.set(ref, {
-            ownerUid: uid, nome, lat, lng, slug, horario, ativo: !extra,
+            ownerUid: uid, nome, lat, lng, slug, horario, horarioCfg, ativo: !extra,
             criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp(),
           });
           tx.set(refP, { ownerUid: uid, pid: ref.id });
@@ -196,6 +205,7 @@ module.exports = async (req, res) => {
         patch.lat = lat; patch.lng = lng;
       }
       if (body.horario !== undefined) { patch.horario = String(body.horario || '').trim().slice(0, 60); }
+      if (body.horarioCfg !== undefined) { patch.horarioCfg = limpaHorarioCfg(body.horarioCfg); }
       await ref.update(patch);
       res.status(200).json({ ok: true });
       return;
