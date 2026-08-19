@@ -38,6 +38,37 @@ async function resolverParceiro(slug) {
   } catch (e) { return null; }
 }
 
+// Trava anti "cadastro fantasma": um lojista só pode operar como parceiro (e
+// receber comissão) enquanto for assinante pago (não trial, não Básico
+// gratuito). Regra espelhada da mesma checagem do painel (ehPagante() em
+// index.html) — aqui é a versão que decide de verdade se o dinheiro sai.
+//
+// Parceiro PURO (afiliado/influenciador via seja-parceiro.html) nunca teve
+// negócio nem assinatura no Moviki -> não existe assinaturas/{puid} pra ele,
+// e a regra de "pagante" simplesmente não se aplica (ele não é lojista).
+async function parceiroPodeGanhar(puid) {
+  try {
+    // negocios/{puid} existe só pra quem já foi (ou é) lojista no Moviki.
+    // Se não existe, é parceiro puro (afiliado/influenciador) -> regra não se aplica.
+    const neg = await db.collection('negocios').doc(puid).get();
+    if (!neg.exists) return true;
+
+    // É lojista: só ganha comissão com assinatura ativa e paga (nunca trial).
+    // Sem assinaturas/{puid} (nunca ativou nem o trial) conta como Básico -> nega.
+    const a = await db.collection('assinaturas').doc(puid).get();
+    if (!a.exists) return false;
+    const d = a.data() || {};
+    const dentroDoPrazo = !d.vence_em || d.vence_em.toMillis() > Date.now();
+    return d.ativo === true && dentroDoPrazo && d.periodo !== 'trial';
+  } catch (e) {
+    // Erro ao checar -> nega por segurança (evita vazamento financeiro pra
+    // quem não deveria ganhar; melhor perder uma comissão pontual por falha
+    // técnica rara do que creditar quem não é pagante).
+    console.error('parceiroPodeGanhar erro (negando por segurança):', e);
+    return false;
+  }
+}
+
 // Registra UMA comissão. O id é payId_nN (fixo): se o Asaas reenviar o mesmo
 // pagamento, o .create() falha e a gente ignora -> nunca conta duas vezes.
 async function creditarComissao(o) {
@@ -89,7 +120,7 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
 
   // Nível 1 (recorrente)
   const p1 = await resolverParceiro(slug1);
-  if (p1 && p1.data.status === 'aprovado') {
+  if (p1 && p1.data.status === 'aprovado' && await parceiroPodeGanhar(p1.uid)) {
     await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: 0.15, payId, competencia });
     creditados.add(p1.uid);
   }
@@ -98,13 +129,13 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   if (primeiro) {
     const slug2 = p1 ? (p1.data.indicadoPor || '') : '';
     const p2 = slug2 ? await resolverParceiro(slug2) : null;
-    if (p2 && p2.data.status === 'aprovado' && !creditados.has(p2.uid)) {
+    if (p2 && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
       await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia });
       creditados.add(p2.uid);
     }
     const slug3 = p2 ? (p2.data.indicadoPor || '') : '';
     const p3 = slug3 ? await resolverParceiro(slug3) : null;
-    if (p3 && p3.data.status === 'aprovado' && !creditados.has(p3.uid)) {
+    if (p3 && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
       await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia });
       creditados.add(p3.uid);
     }
