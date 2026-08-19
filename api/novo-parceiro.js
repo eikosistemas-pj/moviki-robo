@@ -1,6 +1,6 @@
 // api/novo-parceiro.js  (repo: moviki-robo)
 // Avisa o dono no Telegram quando entra um parceiro novo (status "pendente").
-// NOVO: decide, no servidor, se o parceiro já entra "aprovado" (auto) ou fica
+// Decide, no servidor, se o parceiro já entra "aprovado" (auto) ou fica
 // "pendente" (manual), conforme configuracoes/sistema.aprovacaoAutomaticaParceiros.
 //
 // Segurança: só age em cima de um parceiro pendente cujo uid bate com o dono do
