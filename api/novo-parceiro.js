@@ -2,6 +2,9 @@
 // Avisa o dono no Telegram quando entra um parceiro novo (status "pendente").
 // Decide, no servidor, se o parceiro já entra "aprovado" (auto) ou fica
 // "pendente" (manual), conforme configuracoes/sistema.aprovacaoAutomaticaParceiros.
+// Quando entra "aprovado" automático, também dispara o e-mail de boas-vindas
+// aqui mesmo — a aprovação automática não passa pelo botão "Aprovar" do painel
+// do dono, então é aqui (e só aqui) que esse caminho fica coberto.
 //
 // Segurança: só age em cima de um parceiro pendente cujo uid bate com o dono do
 // idToken (Admin SDK verifica). Escrita de status é sempre via Admin SDK — só o
@@ -11,8 +14,10 @@
 //   FIREBASE_SERVICE_ACCOUNT -> Admin SDK (via lib/firebase.js)
 //   TELEGRAM_TOKEN           -> token do bot (do @BotFather)
 //   TELEGRAM_CHAT_ID         -> seu chat_id no Telegram
+//   RESEND_API_KEY           -> e-mail de boas-vindas (via lib/boasVindasParceiro.js)
 
 const { admin, db } = require('../lib/firebase');
+const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
@@ -84,12 +89,28 @@ module.exports = async (req, res) => {
       console.error('[novo-parceiro] Falha ao ler configuracoes/sistema, seguindo manual:', e);
     }
 
+    let boasVindasOk = null;
+
     if (auto) {
       await parceiroRef.update({
         status: 'aprovado',
         aprovadoEm: admin.firestore.FieldValue.serverTimestamp(),
         aprovadoPor: 'automatico',
       });
+
+      // Aprovação automática não passa pelo botão "Aprovar" do painel do dono
+      // (que é quem normalmente dispara o e-mail) — então disparamos aqui.
+      try {
+        const r = await enviarBoasVindasParceiro({
+          admin,
+          parceiroRef,
+          p: Object.assign({}, p, { status: 'aprovado' }),
+        });
+        boasVindasOk = r.ok === true;
+      } catch (e) {
+        console.error('[novo-parceiro] Erro ao enviar e-mail de boas-vindas automático:', e);
+        boasVindasOk = false;
+      }
     }
 
     // 4) Manda o aviso no Telegram (sem dados sensíveis — a chave Pix NÃO vai).
@@ -107,7 +128,12 @@ module.exports = async (req, res) => {
 
     const telegramOk = await enviarTelegram(texto);
 
-    res.status(200).json({ ok: true, status: auto ? 'aprovado' : 'pendente', telegram: telegramOk });
+    res.status(200).json({
+      ok: true,
+      status: auto ? 'aprovado' : 'pendente',
+      telegram: telegramOk,
+      boasVindas: boasVindasOk,
+    });
   } catch (e) {
     console.error('[novo-parceiro] Erro inesperado:', e);
     res.status(200).json({ ok: false });
