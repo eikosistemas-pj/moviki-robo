@@ -1,0 +1,32 @@
+name: Aprovar parceiros pendentes (aprovação automática com delay)
+
+# Chama api/novo-parceiro.js?processarPendentes=1 a cada 5 minutos. Existe
+# porque o cron nativo da Vercel, no plano Hobby, só roda 1x por dia — não
+# serve pra um delay de minutos. O endpoint só aprova quem já passou do
+# tempo mínimo de análise (10 min, configurado em DELAY_MIN_MINUTOS dentro
+# do próprio api/novo-parceiro.js) e só se a aprovação automática estiver
+# ligada no painel do dono.
+#
+# Requer um Secret deste repositório (Settings -> Secrets and variables ->
+# Actions -> New repository secret) chamado CRON_SECRET, com o MESMO valor
+# da env CRON_SECRET já configurada no projeto moviki-robo na Vercel.
+#
+# Atenção: o GitHub desativa workflows agendados sozinho depois de 60 dias
+# sem nenhum commit no repositório. Como este é o repo do backend (recebe
+# commits com frequência), não deve ser um problema na prática — mas se
+# notar que parou de rodar, é só reativar em Actions -> este workflow.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  aprovar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chamar o robô
+        run: |
+          curl -sS -X POST "https://moviki-robo.vercel.app/api/novo-parceiro?processarPendentes=1" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --fail-with-body
