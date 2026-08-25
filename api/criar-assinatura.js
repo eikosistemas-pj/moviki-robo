@@ -29,7 +29,7 @@ module.exports = async (req, res) => {
     const email = decoded.email || (req.body && req.body.email) || undefined;
 
     // 2) Valida plano/periodo/CPF.
-    const { plano, periodo, cpfCnpj, nome } = req.body || {};
+    const { plano, periodo, cpfCnpj, nome, gaClientId, gaSessionId } = req.body || {};
     if (!PLANOS[plano] || !PLANOS[plano][periodo]) {
       return res.status(400).json({ erro: 'Plano ou periodo invalido.' });
     }
@@ -94,6 +94,15 @@ module.exports = async (req, res) => {
       externalReference: uid,
     });
     await fatRef.set({ asaasSubscriptionId: assin.id }, { merge: true });
+
+    // GA4: guarda os ids da sessao do navegador (mandados pelo painel) pra
+    // amarrar a venda quando o pagamento confirmar no webhook. Best-effort:
+    // nunca derruba a assinatura.
+    try {
+      const gaCid = gaClientId ? String(gaClientId).slice(0, 64) : '';
+      const gaSid = gaSessionId ? String(gaSessionId).slice(0, 40) : '';
+      if (gaCid || gaSid) await fatRef.set({ gaClientId: gaCid, gaSessionId: gaSid }, { merge: true });
+    } catch (_) {}
 
     // 5) Marca no banco como PENDENTE (ativo:false). O webhook liga quando pagar.
     //    assinaturas/{uid} e a colecao publica que o app le pra liberar recursos —
