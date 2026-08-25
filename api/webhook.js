@@ -6,6 +6,7 @@
 const { admin, db } = require('../lib/firebase');
 const { PLANOS } = require('../lib/asaas');
 const crypto = require('crypto');
+const ga = require('../lib/ga');
 
 // Pagamento entrou -> liga o plano
 const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
@@ -142,6 +143,37 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   }
 }
 
+// GA4: registra a venda (purchase) no Google Analytics, do lado servidor.
+// Deduplicado por faturamento/{uid}/ga/{payId}: o Asaas manda 2 eventos por
+// pagamento (RECEIVED e CONFIRMED) e reenvia em falha — o .create() so passa
+// na 1a vez, entao a venda conta UMA vez. NUNCA derruba o webhook (best-effort).
+async function registrarPurchaseGA(uid, plano, periodo, pay) {
+  const payId = String(pay.id || '');
+  if (!payId) return;
+  const valor = Number(pay.value) || 0;
+  if (!(valor > 0) || periodo === 'trial') return; // trial nao e venda
+
+  // Reserva o slot desta venda. Se ja existe, outro evento do mesmo pagamento
+  // ja mediu -> sai sem contar de novo.
+  const marcaRef = db.collection('faturamento').doc(uid).collection('ga').doc(payId);
+  try {
+    await marcaRef.create({ em: admin.firestore.FieldValue.serverTimestamp() });
+  } catch (e) {
+    return; // ja registrado
+  }
+
+  // Ids da sessao GA4 gravados pelo painel no checkout (criar-assinatura.js).
+  let cid = '', sid = '';
+  try {
+    const fat = await db.collection('faturamento').doc(uid).get();
+    const f = fat.exists ? (fat.data() || {}) : {};
+    cid = f.gaClientId || '';
+    sid = f.gaSessionId || '';
+  } catch (_) {}
+
+  await ga.purchase({ clientId: cid, sessionId: sid, transactionId: payId, value: valor, plano, periodo });
+}
+
 // Estorno/chargeback: anula (marca estornada) as comissões daquele pagamento.
 async function estornarComissoes(payId) {
   if (!payId) return;
@@ -214,6 +246,10 @@ module.exports = async (req, res) => {
       // derruba: se der erro no cálculo, o plano do lojista já ficou ativo.
       try { await acumularComissoes(uid, periodo, pay); }
       catch (ce) { console.error('comissao erro:', ce); }
+
+      // GA4: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
+      try { await registrarPurchaseGA(uid, plano, periodo, pay); }
+      catch (ge) { console.error('ga purchase erro:', ge); }
     } else {
       await ref.set({
         ativo: false,
