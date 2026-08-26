@@ -1,26 +1,29 @@
 // api/pagar-saque.js  (repo: moviki-robo)
-// Paga um pedido de saque do parceiro.
+// Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
+// a permissão é conferida AQUI no servidor, não dá para burlar pelo app.
 //
-// Dois jeitos, os dois só para ADMIN (documento em /admins/{uid}) — a permissão
-// é conferida AQUI no servidor, não dá para burlar pelo app:
+// Dois caminhos de entrada:
+//   • saqueId    -> paga um PEDIDO DE SAQUE que o parceiro fez.
+//   • parceiroUid-> paga DIRETO pela linha do parceiro na tabela de comissões,
+//                   sem ele ter pedido nada. O robô abre o registro do saque
+//                   sozinho (origem: 'dono') para o histórico não ficar furado.
 //
-//   etapa 'conferir' -> descobre o tipo da chave Pix, consulta no Asaas de quem
-//                       ela é e devolve o nome do titular + o valor a pagar,
-//                       para o dono conferir ANTES de mandar o dinheiro.
-//   etapa 'pagar'    -> manda o Pix de verdade pelo Asaas (POST /transfers),
-//                       quita as comissões e grava o saque como pago.
-//   etapa 'manual'   -> jeito antigo: o dono pagou pelo banco na mão e só
-//                       registra aqui (com comprovante em texto).
+// Três etapas:
+//   'conferir' -> descobre o tipo da chave Pix, consulta no Asaas de quem ela é
+//                 e devolve o titular + o valor, para o dono conferir ANTES de
+//                 mandar o dinheiro. Não grava nada.
+//   'pagar'    -> manda o Pix pelo Asaas (POST /transfers), quita as comissões
+//                 e fecha o saque.
+//   'manual'   -> o dono pagou pelo banco na mão; aqui só registra.
 //
-// Trava de segurança: acima de TETO_SAQUE_AUTOMATICO o robô se recusa a mandar
-// sozinho — aquele saque tem que ser pago na mão e registrado como 'manual'.
+// Trava: acima de TETO_SAQUE_AUTOMATICO o robô se recusa a mandar sozinho.
 
 const { admin, db } = require('../lib/firebase');
 const { asaas } = require('../lib/asaas');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
-// Valor máximo que o robô manda sozinho, por saque. Acima disso, só manual.
+// Valor máximo que o robô manda sozinho, por pagamento. Acima disso, só manual.
 const TETO_SAQUE_AUTOMATICO = 500;
 
 // Quanto tempo um pagamento em curso segura o saque (evita clique duplo).
@@ -70,14 +73,19 @@ function candidatosChavePix(bruto) {
 }
 
 /* ---------------------------------------------------------------
-   Quais comissões esse saque quita: do parceiro, não pagas, não
-   estornadas, criadas até a data do pedido e já liberadas nessa data.
+   Quais comissões esse pagamento quita: do parceiro, não pagas, não
+   estornadas, criadas até a data de corte e já liberadas nessa data.
    (liberaEm ausente = comissão antiga, tratada como já liberada.)
    --------------------------------------------------------------- */
-function ms(x) { return (x && typeof x.toMillis === 'function') ? x.toMillis() : null; }
+function ms(x) {
+  if (!x) return null;
+  if (typeof x.toMillis === 'function') return x.toMillis();
+  if (typeof x === 'number') return x;
+  return null;
+}
 
-function selecionarComissoes(docs, saque) {
-  const limiteMs = ms(saque.pedidoEm);
+function selecionarComissoes(docs, corte) {
+  const limiteMs = ms(corte);
   const escolhidas = [];
   let valor = 0;
   docs.forEach((d) => {
@@ -128,14 +136,19 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST')    { res.status(405).json({ ok: false }); return; }
 
+  const limpar = (v) => String(v || '').replace(/[^a-zA-Z0-9_-]/g, '');
+
   try {
     const body        = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const idToken     = String(body.idToken || '');
-    const saqueId     = String(body.saqueId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const saqueId     = limpar(body.saqueId);
+    const uidPedido   = limpar(body.parceiroUid);
     const comprovante = String(body.comprovante || '').slice(0, 200);
     const etapa       = ['conferir', 'pagar', 'manual'].indexOf(String(body.etapa || '')) > -1
                           ? String(body.etapa) : 'manual';
-    if (!idToken || !saqueId) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
+    if (!idToken || (!saqueId && !uidPedido)) {
+      res.status(400).json({ ok: false, erro: 'faltam dados' }); return;
+    }
 
     // 1) Quem está chamando? É admin de verdade?
     let decoded;
@@ -144,32 +157,56 @@ module.exports = async (req, res) => {
     const adminDoc = await db.collection('admins').doc(decoded.uid).get();
     if (!adminDoc.exists) { res.status(403).json({ ok: false, erro: 'sem permissao' }); return; }
 
-    // 2) Carrega o saque.
-    const saqueRef  = db.collection('saques').doc(saqueId);
-    const saqueSnap = await saqueRef.get();
-    if (!saqueSnap.exists) { res.status(404).json({ ok: false, erro: 'saque nao encontrado' }); return; }
-    const saque = saqueSnap.data();
-    if (saque.status === 'pago') {
-      res.status(200).json({ ok: true, jaPago: true, valorPago: saque.valorPago || 0 });
-      return;
+    // 2) De quem estamos falando e até que data vale o corte.
+    const avulso = !saqueId;                 // pagamento direto pela linha do parceiro
+    let saqueRef = null, parceiroUid = null, corte = null;
+
+    if (!avulso) {
+      saqueRef = db.collection('saques').doc(saqueId);
+      const snap = await saqueRef.get();
+      if (!snap.exists) { res.status(404).json({ ok: false, erro: 'saque nao encontrado' }); return; }
+      const saque = snap.data();
+      if (saque.status === 'pago') {
+        res.status(200).json({ ok: true, jaPago: true, valorPago: saque.valorPago || 0 });
+        return;
+      }
+      parceiroUid = saque.parceiroUid;
+      corte = saque.pedidoEm;
+    } else {
+      parceiroUid = uidPedido;
+      corte = admin.firestore.Timestamp.now();
+      // Se o parceiro já pediu saque, paga POR ALI (senão vira pagamento duplo).
+      const abertos = await db.collection('saques')
+        .where('parceiroUid', '==', parceiroUid)
+        .where('status', '==', 'solicitado').get();
+      if (!abertos.empty) {
+        res.status(409).json({ ok: false, erro: 'pedido_aberto',
+          mensagem: 'Este parceiro já tem um pedido de saque em aberto. Pague por "Pedidos de saque", ali em cima.' });
+        return;
+      }
     }
 
-    const parceiroUid = saque.parceiroUid;
-
-    // 3) Comissões que esse saque quita + valor real a pagar.
+    // 3) Comissões que esse pagamento quita + valor real.
     const cs = await db.collection('comissoes').where('parceiroUid', '==', parceiroUid).get();
-    const sel = selecionarComissoes(cs.docs, saque);
+    const sel = selecionarComissoes(cs.docs, corte);
     const valor = sel.valor;
 
     // ---------- etapa MANUAL: o dono pagou pelo banco, só registra ----------
     if (etapa === 'manual') {
+      if (avulso) {
+        if (valor <= 0) {
+          res.status(409).json({ ok: false, erro: 'sem_valor',
+            mensagem: 'Este parceiro não tem comissão liberada para quitar.' }); return;
+        }
+        saqueRef = db.collection('saques').doc();
+      }
       const batch = db.batch();
       sel.escolhidas.forEach((d) => batch.update(d.ref, {
         pago: true,
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-        saqueId: saqueId,
+        saqueId: saqueRef.id,
       }));
-      batch.update(saqueRef, {
+      const dadosSaque = {
         status: 'pago',
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
         valorPago: valor,
@@ -177,7 +214,17 @@ module.exports = async (req, res) => {
         comprovante: comprovante || null,
         formaPagamento: 'manual',
         pagoPor: decoded.uid,
-      });
+      };
+      if (avulso) {
+        batch.set(saqueRef, Object.assign({
+          parceiroUid: parceiroUid,
+          valorSolicitado: valor,
+          pedidoEm: corte,
+          origem: 'dono',
+        }, dadosSaque));
+      } else {
+        batch.update(saqueRef, dadosSaque);
+      }
       await batch.commit();
       res.status(200).json({ ok: true, valorPago: valor, qtd: sel.escolhidas.length, forma: 'manual' });
       return;
@@ -186,7 +233,7 @@ module.exports = async (req, res) => {
     // ---------- daqui pra baixo é Pix automático ----------
     if (valor <= 0) {
       res.status(409).json({ ok: false, erro: 'sem_valor',
-        mensagem: 'Não há comissão liberada para quitar neste pedido.' });
+        mensagem: 'Não há comissão liberada para quitar agora.' });
       return;
     }
     if (valor > TETO_SAQUE_AUTOMATICO) {
@@ -219,31 +266,45 @@ module.exports = async (req, res) => {
         ok: true, etapa: 'conferir', valor: valor, qtd: sel.escolhidas.length,
         chave: dados.chave, tipoChave: dados.tipo,
         titular: dados.titular, documento: dados.documento, banco: dados.banco,
+        parceiro: parceiro.nome || '', avulso: avulso,
       });
       return;
     }
 
     // ---------- etapa PAGAR ----------
-    // Trava contra clique duplo: quem conseguir marcar primeiro é quem paga.
-    try {
-      await db.runTransaction(async (tx) => {
-        const s = await tx.get(saqueRef);
-        const d = s.data() || {};
-        if (d.status === 'pago') { const e = new Error('ja_pago'); e.code = 'ja_pago'; throw e; }
-        const emCurso = ms(d.pagamentoEmCursoEm);
-        if (emCurso && (Date.now() - emCurso) < TRAVA_MS) {
-          const e = new Error('em_curso'); e.code = 'em_curso'; throw e;
-        }
-        tx.update(saqueRef, { pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp() });
+    if (avulso) {
+      // Abre o registro do saque já travado, para clique duplo não pagar 2x.
+      saqueRef = db.collection('saques').doc();
+      await saqueRef.set({
+        parceiroUid: parceiroUid,
+        valorSolicitado: valor,
+        status: 'solicitado',
+        pedidoEm: corte,
+        origem: 'dono',
+        pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp(),
       });
-    } catch (err) {
-      if (err.code === 'ja_pago') { res.status(200).json({ ok: true, jaPago: true }); return; }
-      res.status(409).json({ ok: false, erro: 'em_curso',
-        mensagem: 'Esse pagamento já está sendo processado. Aguarde alguns instantes e atualize.' });
-      return;
+    } else {
+      // Trava contra clique duplo: quem conseguir marcar primeiro é quem paga.
+      try {
+        await db.runTransaction(async (tx) => {
+          const s = await tx.get(saqueRef);
+          const d = s.data() || {};
+          if (d.status === 'pago') { const e = new Error('ja_pago'); e.code = 'ja_pago'; throw e; }
+          const emCurso = ms(d.pagamentoEmCursoEm);
+          if (emCurso && (Date.now() - emCurso) < TRAVA_MS) {
+            const e = new Error('em_curso'); e.code = 'em_curso'; throw e;
+          }
+          tx.update(saqueRef, { pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp() });
+        });
+      } catch (err) {
+        if (err.code === 'ja_pago') { res.status(200).json({ ok: true, jaPago: true }); return; }
+        res.status(409).json({ ok: false, erro: 'em_curso',
+          mensagem: 'Esse pagamento já está sendo processado. Aguarde alguns instantes e atualize.' });
+        return;
+      }
     }
 
-    // Manda o Pix. externalReference = saqueId (rastreia lá no Asaas).
+    // Manda o Pix. externalReference = id do saque (rastreia lá no Asaas).
     let transf;
     try {
       transf = await asaas('/transfers', 'POST', {
@@ -252,7 +313,7 @@ module.exports = async (req, res) => {
         pixAddressKey: dados.chave,
         pixAddressKeyType: dados.tipo,
         description: 'Moviki - comissao de parceiro',
-        externalReference: saqueId,
+        externalReference: saqueRef.id,
       });
     } catch (err) {
       await saqueRef.update({
@@ -262,15 +323,14 @@ module.exports = async (req, res) => {
       });
       res.status(502).json({ ok: false, erro: 'asaas',
         mensagem: 'O Asaas recusou a transferência: ' + (err.message || 'erro') +
-                  '. Nenhum valor saiu e o saque continua em aberto.' });
+                  '. Nenhum valor saiu e nada foi quitado.' });
       return;
     }
 
     const st = String((transf && transf.status) || '').toUpperCase();
 
     // Se a conta Asaas exige aprovação em duas etapas, a transferência nasce
-    // NÃO autorizada. Nesse caso o dinheiro ainda não saiu: não quita nada aqui,
-    // avisa o dono para autorizar no painel do Asaas.
+    // NÃO autorizada. O dinheiro ainda não saiu: não quita nada aqui.
     if (transf && transf.authorized === false) {
       await saqueRef.update({
         pagamentoEmCursoEm: null,
@@ -300,7 +360,7 @@ module.exports = async (req, res) => {
     sel.escolhidas.forEach((d) => batch.update(d.ref, {
       pago: true,
       pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-      saqueId: saqueId,
+      saqueId: saqueRef.id,
     }));
     batch.update(saqueRef, {
       status: 'pago',
