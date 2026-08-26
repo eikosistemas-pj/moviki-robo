@@ -348,7 +348,8 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Manda o Pix. externalReference = id do saque (rastreia lá no Asaas).
+    // Manda o Pix. externalReference = id do saque (rastreia lá no Asaas e
+    // serve de trava: o Asaas recusa uma segunda transferência com o mesmo).
     let transf;
     try {
       transf = await asaas('/transfers', 'POST', {
@@ -360,15 +361,31 @@ module.exports = async (req, res) => {
         externalReference: saqueRef.id,
       });
     } catch (err) {
-      await saqueRef.update({
-        pagamentoEmCursoEm: null,
-        ultimoErroPagamento: String(err.message || 'falha').slice(0, 200),
-        ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
-      });
-      res.status(502).json({ ok: false, erro: 'asaas',
-        mensagem: 'O Asaas recusou a transferência: ' + (err.message || 'erro') +
-                  '. Nenhum valor saiu e nada foi quitado.' });
-      return;
+      // "Saque X já solicitado" = a transferência JÁ EXISTE lá (a 1ª tentativa
+      // chegou, só a resposta que se perdeu). Nesse caso o dinheiro pode ter
+      // saído: em vez de dar erro, vamos buscar a transferência e seguir com ela.
+      const msg = String(err.message || '');
+      const jaExiste = /j[áa] solicitad/i.test(msg) || /already/i.test(msg);
+      if (jaExiste) {
+        try {
+          const busca = await asaas('/transfers?externalReference=' +
+                                    encodeURIComponent(saqueRef.id), 'GET');
+          const achada = (busca && busca.data && busca.data[0]) || null;
+          const stA = String((achada && achada.status) || '').toUpperCase();
+          if (achada && stA !== 'CANCELLED' && stA !== 'FAILED') transf = achada;
+        } catch (_) { /* não achou: cai no erro normal abaixo */ }
+      }
+      if (!transf) {
+        await saqueRef.update({
+          pagamentoEmCursoEm: null,
+          ultimoErroPagamento: msg.slice(0, 200),
+          ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        res.status(502).json({ ok: false, erro: 'asaas',
+          mensagem: 'O Asaas recusou a transferência: ' + (msg || 'erro') +
+                    '. Nenhum valor saiu e nada foi quitado.' });
+        return;
+      }
     }
 
     const st = String((transf && transf.status) || '').toUpperCase();

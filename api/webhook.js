@@ -187,6 +187,124 @@ async function estornarComissoes(payId) {
   await bat.commit();
 }
 
+
+// ==========================================================
+//  TRANSFERÊNCIAS (Pix de comissão saindo da conta Asaas)
+//  O Asaas avisa aqui quando o Pix REALMENTE cai (TRANSFER_DONE)
+//  ou quando ele falha depois de enviado. Assim o painel fica
+//  verdinho sozinho, sem ninguém precisar clicar de novo.
+// ==========================================================
+
+const TRANSFER_OK   = ['TRANSFER_DONE'];
+const TRANSFER_RUIM = ['TRANSFER_FAILED', 'TRANSFER_CANCELLED', 'TRANSFER_BLOCKED'];
+
+// Acha o saque daquela transferência: primeiro pelo id que gravamos no saque,
+// depois pelo externalReference (que é o próprio id do documento de saque).
+async function acharSaqueDaTransferencia(tr) {
+  const id = String(tr.id || '');
+  if (id) {
+    const q = await db.collection('saques').where('transferenciaId', '==', id).limit(1).get();
+    if (!q.empty) return q.docs[0];
+  }
+  const ext = String(tr.externalReference || '');
+  if (ext) {
+    const d = await db.collection('saques').doc(ext).get();
+    if (d.exists) return d;
+  }
+  return null;
+}
+
+// Quita as comissões cobertas por um saque (mesma régua do pagar-saque.js:
+// do parceiro, não pagas, não estornadas, criadas e liberadas até o pedido).
+async function quitarComissoesDoSaque(saqueDoc) {
+  const saque = saqueDoc.data() || {};
+  const limiteMs = (saque.pedidoEm && typeof saque.pedidoEm.toMillis === 'function')
+                     ? saque.pedidoEm.toMillis() : null;
+  const cs = await db.collection('comissoes').where('parceiroUid', '==', saque.parceiroUid).get();
+  const bat = db.batch();
+  let valor = 0, qtd = 0;
+  cs.forEach((d) => {
+    const c = d.data();
+    if (c.pago || c.estornada) return;
+    const cMs = (c.criadoEm && typeof c.criadoEm.toMillis === 'function') ? c.criadoEm.toMillis() : null;
+    if (limiteMs && cMs && cMs > limiteMs) return;
+    const libMs = (c.liberaEm && typeof c.liberaEm.toMillis === 'function') ? c.liberaEm.toMillis() : null;
+    if (limiteMs && libMs && libMs > limiteMs) return;
+    bat.update(d.ref, {
+      pago: true,
+      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
+      saqueId: saqueDoc.id,
+    });
+    valor += Number(c.valor) || 0;
+    qtd++;
+  });
+  await bat.commit();
+  return { valor: Math.round(valor * 100) / 100, qtd };
+}
+
+// Desfaz a baixa: usado quando o Pix falha DEPOIS de já ter sido dado como pago.
+async function reabrirComissoesDoSaque(saqueId) {
+  const cs = await db.collection('comissoes').where('saqueId', '==', saqueId).get();
+  if (cs.empty) return 0;
+  const bat = db.batch();
+  cs.forEach((d) => bat.update(d.ref, { pago: false, pagoEm: null, saqueId: null }));
+  await bat.commit();
+  return cs.size;
+}
+
+async function tratarTransferencia(tipo, tr) {
+  const doc = await acharSaqueDaTransferencia(tr);
+  if (!doc) return { ignorado: 'saque nao encontrado' };
+  const saque = doc.data() || {};
+  const st = String(tr.status || '').toUpperCase();
+  const recibo = tr.transactionReceiptUrl || null;
+
+  // Pix caiu de verdade.
+  if (TRANSFER_OK.indexOf(tipo) > -1) {
+    if (saque.status === 'pago') {
+      await doc.ref.update({
+        transferenciaStatus: st || 'DONE',
+        comprovanteUrl: recibo,
+        confirmadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return { jaEstavaPago: true };
+    }
+    const r = await quitarComissoesDoSaque(doc);
+    await doc.ref.update({
+      status: 'pago',
+      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
+      valorPago: r.valor || Number(tr.value) || saque.valorSolicitado || 0,
+      comissoesQuitadas: r.qtd,
+      formaPagamento: saque.formaPagamento || 'pix_automatico',
+      transferenciaId: saque.transferenciaId || String(tr.id || '') || null,
+      transferenciaStatus: st || 'DONE',
+      comprovante: saque.comprovante || ('Pix Asaas ' + String(tr.id || '')),
+      comprovanteUrl: recibo,
+      pagamentoEmCursoEm: null,
+      confirmadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { quitado: r.qtd, valor: r.valor };
+  }
+
+  // Pix falhou / foi cancelado / bloqueado.
+  if (TRANSFER_RUIM.indexOf(tipo) > -1) {
+    let reabertas = 0;
+    if (saque.status === 'pago') reabertas = await reabrirComissoesDoSaque(doc.id);
+    await doc.ref.update({
+      status: 'falhou',
+      transferenciaStatus: st || tipo,
+      ultimoErroPagamento: String(tr.failReason || tipo).slice(0, 200),
+      ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
+      pagamentoEmCursoEm: null,
+    });
+    return { falhou: true, reabertas: reabertas };
+  }
+
+  // Ainda a caminho (criada / pendente / em processamento no banco).
+  await doc.ref.update({ transferenciaStatus: st || tipo });
+  return { emAndamento: true };
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).end();
 
@@ -202,6 +320,18 @@ module.exports = async (req, res) => {
   try {
     const evento = req.body || {};
     const tipo = evento.event;
+
+    // Evento de TRANSFERÊNCIA (Pix de comissão saindo daqui) — trata e sai.
+    if (evento.transfer || String(tipo || '').indexOf('TRANSFER_') === 0) {
+      try {
+        const r = await tratarTransferencia(tipo, evento.transfer || {});
+        return res.status(200).json(Object.assign({ ok: true }, r));
+      } catch (te) {
+        console.error('transferencia webhook erro:', te);
+        return res.status(500).json({ erro: te.message });
+      }
+    }
+
     const pay = evento.payment || {};
     const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
 
