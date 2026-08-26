@@ -15,6 +15,11 @@
 //   'pagar'    -> manda o Pix pelo Asaas (POST /transfers), quita as comissões
 //                 e fecha o saque.
 //   'manual'   -> o dono pagou pelo banco na mão; aqui só registra.
+//   'teste'    -> cria UMA comissão de mentira (até R$ 10) para ensaiar o Pix.
+//
+// Tudo mora neste mesmo arquivo de propósito: o plano gratuito da Vercel
+// aceita no máximo 12 arquivos na pasta api, então não dá para abrir um
+// endereço novo a cada função.
 //
 // Trava: acima de TETO_SAQUE_AUTOMATICO o robô se recusa a mandar sozinho.
 
@@ -28,6 +33,9 @@ const TETO_SAQUE_AUTOMATICO = 500;
 
 // Quanto tempo um pagamento em curso segura o saque (evita clique duplo).
 const TRAVA_MS = 3 * 60 * 1000;
+
+// Valor máximo de uma comissão de TESTE (etapa 'teste').
+const VALOR_MAX_TESTE = 10;
 
 /* ---------------------------------------------------------------
    Chave Pix: descobrir o tipo a partir do que o parceiro digitou.
@@ -144,7 +152,7 @@ module.exports = async (req, res) => {
     const saqueId     = limpar(body.saqueId);
     const uidPedido   = limpar(body.parceiroUid);
     const comprovante = String(body.comprovante || '').slice(0, 200);
-    const etapa       = ['conferir', 'pagar', 'manual'].indexOf(String(body.etapa || '')) > -1
+    const etapa       = ['conferir', 'pagar', 'manual', 'teste'].indexOf(String(body.etapa || '')) > -1
                           ? String(body.etapa) : 'manual';
     if (!idToken || (!saqueId && !uidPedido)) {
       res.status(400).json({ ok: false, erro: 'faltam dados' }); return;
@@ -156,6 +164,42 @@ module.exports = async (req, res) => {
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
     const adminDoc = await db.collection('admins').doc(decoded.uid).get();
     if (!adminDoc.exists) { res.status(403).json({ ok: false, erro: 'sem permissao' }); return; }
+
+    // ---------- etapa TESTE: cria uma comissão de mentira para ensaiar ----------
+    if (etapa === 'teste') {
+      const valorTeste = Math.round((Number(body.valor) || 0) * 100) / 100;
+      if (!uidPedido) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
+      if (!(valorTeste > 0) || valorTeste > VALOR_MAX_TESTE) {
+        res.status(422).json({ ok: false, erro: 'valor_invalido',
+          mensagem: 'Use um valor entre R$ 0,01 e R$ ' + VALOR_MAX_TESTE + ',00 para o teste.' });
+        return;
+      }
+      const pSnap = await db.collection('parceiros').doc(uidPedido).get();
+      if (!pSnap.exists) { res.status(404).json({ ok: false, erro: 'parceiro nao encontrado' }); return; }
+      const p = pSnap.data();
+      const agora = new Date();
+      const competencia = agora.getUTCFullYear() + '-' + String(agora.getUTCMonth() + 1).padStart(2, '0');
+      const marca = 'TESTE_' + Date.now();
+      // Nasce SEM liberaEm, ou seja, já liberada para saque.
+      await db.collection('comissoes').doc(marca + '_n1').create({
+        parceiroUid: uidPedido,
+        parceiroSlug: p.slug || null,
+        lojistaUid: 'TESTE',
+        nivel: 1,
+        base: valorTeste,
+        percentual: 100,
+        valor: valorTeste,
+        payId: marca,
+        competencia: competencia,
+        pago: false,
+        estornada: false,
+        teste: true,
+        criadoEm: admin.firestore.FieldValue.serverTimestamp(),
+        criadaPor: decoded.uid,
+      });
+      res.status(200).json({ ok: true, valor: valorTeste, parceiro: p.nome || '' });
+      return;
+    }
 
     // 2) De quem estamos falando e até que data vale o corte.
     const avulso = !saqueId;                 // pagamento direto pela linha do parceiro
