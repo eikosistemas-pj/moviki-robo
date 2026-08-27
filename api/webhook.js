@@ -7,6 +7,7 @@ const { admin, db } = require('../lib/firebase');
 const { PLANOS } = require('../lib/asaas');
 const crypto = require('crypto');
 const ga = require('../lib/ga');
+const meta = require('../lib/meta');
 
 // Pagamento entrou -> liga o plano
 const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
@@ -143,11 +144,16 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   }
 }
 
-// GA4: registra a venda (purchase) no Google Analytics, do lado servidor.
-// Deduplicado por faturamento/{uid}/ga/{payId}: o Asaas manda 2 eventos por
-// pagamento (RECEIVED e CONFIRMED) e reenvia em falha — o .create() so passa
-// na 1a vez, entao a venda conta UMA vez. NUNCA derruba o webhook (best-effort).
-async function registrarPurchaseGA(uid, plano, periodo, pay) {
+// Mede a venda no GA4 (Measurement Protocol) e na Meta (Conversions API), do
+// lado servidor. Deduplicado por faturamento/{uid}/ga/{payId}: o Asaas manda 2
+// eventos por pagamento (RECEIVED e CONFIRMED) e reenvia em falha — o .create()
+// so passa na 1a vez, entao a venda conta UMA vez nos DOIS.
+// NUNCA derruba o webhook (best-effort nos dois lados).
+//
+// Meta pela CAPI e nao por pixel: o privacidade.html diz que o site nao usa
+// cookie de publicidade. Aqui nao ha cookie nenhum — o robo manda o evento com
+// o e-mail e o telefone criptografados em SHA-256.
+async function registrarPurchase(uid, plano, periodo, pay) {
   const payId = String(pay.id || '');
   if (!payId) return;
   const valor = Number(pay.value) || 0;
@@ -172,6 +178,24 @@ async function registrarPurchaseGA(uid, plano, periodo, pay) {
   } catch (_) {}
 
   await ga.purchase({ clientId: cid, sessionId: sid, transactionId: payId, value: valor, plano, periodo });
+
+  // --- Meta (Conversions API) ---
+  // Dados de correspondencia: e-mail vem do Auth (nao existe campo de e-mail em
+  // negocios/{uid}) e telefone vem do whatsapp do negocio. Os dois sao opcionais:
+  // sem nenhum dos dois o lib/meta.js ainda manda com o external_id do uid.
+  let email = '', telefone = '';
+  try { const u = await admin.auth().getUser(uid); email = (u && u.email) || ''; } catch (_) {}
+  try {
+    const neg = await db.collection('negocios').doc(uid).get();
+    if (neg.exists) telefone = String((neg.data() || {}).whatsapp || '');
+  } catch (_) {}
+
+  try {
+    await meta.purchase({
+      pagamentoId: payId, uid, email, telefone,
+      valor, plano, periodo,
+    });
+  } catch (me) { console.error('meta purchase erro:', me); }
 }
 
 // Estorno/chargeback: anula (marca estornada) as comissões daquele pagamento.
@@ -384,9 +408,9 @@ module.exports = async (req, res) => {
       try { await acumularComissoes(uid, periodo, pay); }
       catch (ce) { console.error('comissao erro:', ce); }
 
-      // GA4: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
-      try { await registrarPurchaseGA(uid, plano, periodo, pay); }
-      catch (ge) { console.error('ga purchase erro:', ge); }
+      // GA4 + Meta: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
+      try { await registrarPurchase(uid, plano, periodo, pay); }
+      catch (ge) { console.error('purchase medicao erro:', ge); }
     } else {
       await ref.set({
         ativo: false,

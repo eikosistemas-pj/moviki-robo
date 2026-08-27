@@ -9,6 +9,7 @@
 //   TELEGRAM_CHAT_ID  -> seu chat_id no Telegram
 
 const { admin, db } = require('../lib/firebase');
+const meta = require('../lib/meta');
 
 const ORIGIN_OK   = 'https://app.moviki.com.br';
 const PAINEL_DONO = 'https://app.moviki.com.br/eikoadm01.html';
@@ -44,6 +45,16 @@ module.exports = async (req, res) => {
       const neg = await db.collection('negocios').doc(uid).get();
       if (neg.exists) nome = String((neg.data() || {}).nome || '').trim();
     } catch (_) {}
+
+    // 3b) Meta (Conversions API): marca o CADASTRO como Lead.
+    // Vem ANTES do Telegram de proposito: se as envs do Telegram faltarem, a
+    // funcao sai mais abaixo e a medicao teria sido perdida.
+    // Idempotente duas vezes: o avisos_cliente/{uid} ja barrou repeticao, e o
+    // event_id 'lead_<uid>' faz a propria Meta ignorar duplicata.
+    // Enquanto o volume de venda for baixo, e ESTE o evento com material
+    // suficiente pra campanha otimizar — Purchase sozinho nao sai do aprendizado.
+    try { await meta.lead({ uid, email, origem: 'cadastro_comerciante' }); }
+    catch (_) {}
 
     // 4) Manda o aviso no Telegram.
     const TOKEN = process.env.TELEGRAM_TOKEN;
