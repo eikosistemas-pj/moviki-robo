@@ -53,7 +53,15 @@ module.exports = async (req, res) => {
     // event_id 'lead_<uid>' faz a propria Meta ignorar duplicata.
     // Enquanto o volume de venda for baixo, e ESTE o evento com material
     // suficiente pra campanha otimizar — Purchase sozinho nao sai do aprendizado.
-    try { await meta.lead({ uid, email, origem: 'cadastro_comerciante' }); }
+    // O agente de usuario vem da propria chamada do painel: a Meta exige esse
+    // dado em evento marcado como 'website', e aqui existe navegador de verdade.
+    try {
+      await meta.lead({
+        uid, email,
+        origem: 'cadastro_comerciante',
+        agenteUsuario: String(req.headers['user-agent'] || ''),
+      });
+    }
     catch (_) {}
 
     // 4) Manda o aviso no Telegram.
