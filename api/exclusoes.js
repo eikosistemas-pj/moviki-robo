@@ -2,7 +2,9 @@
 // Painel do dono → Exclusões. Dois modos (campo "action"):
 //   - "listar":  devolve os pedidos de exclusão pendentes (status 'solicitado').
 //   - "excluir": APAGA DE VERDADE a conta do uid informado — cancela a assinatura
-//                no Asaas, apaga os dados no Firestore e remove a conta de acesso.
+//                no Asaas, apaga os dados no Firestore e no Storage, e remove a
+//                conta de acesso. NAO exige pedido aberto: o dono pode excluir
+//                qualquer conta (cadastro de teste, duplicata, abandono).
 //
 // Segurança: só um ADMIN (documento em /admins/{uid}) consegue — a permissão é
 // conferida AQUI no servidor (Admin SDK). O app do lojista NÃO tem acesso a isto.
@@ -14,6 +16,22 @@ const { admin, db } = require('../lib/firebase');
 const { asaas } = require('../lib/asaas');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
+const BUCKET = process.env.FIREBASE_STORAGE_BUCKET || 'moviki-app.firebasestorage.app';
+
+// Apaga os arquivos do usuario no Storage. Sem isto a foto e o documento dele
+// continuavam no balde depois da conta apagada — o que contraria a promessa do
+// painel ("os dados somem definitivamente") e a propria LGPD.
+async function apagarArquivos(uid, resumo) {
+  const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/'];
+  for (const prefix of alvos) {
+    try {
+      await admin.storage().bucket(BUCKET).deleteFiles({ prefix: prefix, force: true });
+      resumo.arquivos = true;
+    } catch (e) {
+      resumo.arquivosErro = (e && e.message) || 'falha';
+    }
+  }
+}
 
 // Apaga todos os docs de uma consulta, em lotes (Firestore aceita até 500/lote).
 async function apagarDaConsulta(query) {
@@ -72,7 +90,18 @@ module.exports = async (req, res) => {
       const uid = String(body.uid || '').replace(/[^a-zA-Z0-9]/g, '');
       if (!uid) { res.status(400).json({ ok: false, erro: 'uid invalido' }); return; }
 
-      const resumo = { assinaturaCancelada: false, avaliacoes: 0, comissoes: 0, saques: 0, parceiro: false, authRemovido: false };
+      // Nao deixa o dono apagar a si mesmo nem outro admin por engano.
+      if (uid === decoded.uid) { res.status(400).json({ ok: false, erro: 'nao da pra excluir a propria conta' }); return; }
+      try {
+        const alvoAdmin = await db.collection('admins').doc(uid).get();
+        if (alvoAdmin.exists) { res.status(400).json({ ok: false, erro: 'essa conta e de um admin' }); return; }
+      } catch (_) {}
+
+      const resumo = {
+        assinaturaCancelada: false, avaliacoes: 0, comissoes: 0, saques: 0,
+        parceiro: false, authRemovido: false, apelidoLiberado: '', pontos: 0,
+        metricas: 0, mensagens: 0, arquivos: false,
+      };
 
       // 1) Cancela a assinatura no Asaas (se houver) — antes de apagar o faturamento.
       try {
@@ -84,13 +113,64 @@ module.exports = async (req, res) => {
         }
       } catch (_) {}
 
-      // 2) Apaga os dados do negócio (+ subcoleção de avaliações) e os docs ligados ao uid.
+      // 2) Apaga os dados do negócio. O documento e LIDO ANTES de sumir: e dele
+      //    que sai o apelido, e sem liberar o apelido ele fica reservado pra
+      //    sempre e ninguem mais consegue usar aquele endereco.
       const negRef = db.collection('negocios').doc(uid);
+      let slugNeg = '';
+      try {
+        const neg = await negRef.get();
+        if (neg.exists) slugNeg = String((neg.data() || {}).slug || '');
+      } catch (_) {}
+
       try { resumo.avaliacoes = await apagarSubcolecao(negRef, 'avaliacoes'); } catch (_) {}
+      try { await apagarSubcolecao(negRef, 'resumo'); } catch (_) {}   // {n, soma} das avaliacoes
       await negRef.delete().catch(() => {});
+
+      if (slugNeg) {
+        await db.collection('slugs').doc(slugNeg).delete().catch(() => {});
+        resumo.apelidoLiberado = slugNeg;
+      }
+
+      // Unidades Enterprise do dono (colecao de topo) + os apelidos delas.
+      try {
+        const pts = await db.collection('pontos').where('ownerUid', '==', uid).get();
+        for (const d of pts.docs) {
+          const sp = String((d.data() || {}).slug || '');
+          if (sp) await db.collection('ponto_slugs').doc(sp).delete().catch(() => {});
+          await d.ref.delete().catch(() => {});
+          resumo.pontos++;
+        }
+      } catch (_) {}
+
+      // Contador de desempenho (metricas/{uid}/dias) — colecao de topo.
+      try {
+        const mref = db.collection('metricas').doc(uid);
+        resumo.metricas = await apagarSubcolecao(mref, 'dias');
+        await mref.delete().catch(() => {});
+      } catch (_) {}
+
+      // Caixa de mensagens: as mensagens sao subcolecao e nao somem com o pai.
+      try {
+        const cref = db.collection('conversas').doc(uid);
+        resumo.mensagens = await apagarSubcolecao(cref, 'mensagens');
+        await cref.delete().catch(() => {});
+      } catch (_) {}
+
       await db.collection('assinaturas').doc(uid).delete().catch(() => {});
-      await db.collection('faturamento').doc(uid).delete().catch(() => {});
+
+      // faturamento tem a subcolecao ga/{payId} (trava de dedup do purchase).
+      try {
+        const fref = db.collection('faturamento').doc(uid);
+        await apagarSubcolecao(fref, 'ga');
+        await fref.delete().catch(() => {});
+      } catch (_) {}
+
       await db.collection('indicacoes').doc(uid).delete().catch(() => {});
+      await db.collection('avisos_cliente').doc(uid).delete().catch(() => {});
+
+      // 2b) Arquivos no Storage (logo do pino, fotos de produto, anexos).
+      await apagarArquivos(uid, resumo);
 
       // 3) Se também for parceiro: libera o apelido e apaga parceiro + comissões/saques dele.
       try {
