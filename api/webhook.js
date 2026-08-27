@@ -311,10 +311,17 @@ module.exports = async (req, res) => {
   // 1) Confirma que a chamada veio MESMO do Asaas: o token que a gente configura
   //    no painel do Asaas vem no header abaixo. Sem ele bater, ignora.
   // Comparacao em tempo constante pra nao vazar o token por medicao de tempo.
+  // Aceita DOIS tokens: o de sempre (cobrancas) e um segundo, opcional, para o
+  // webhook de transferencias. Assim da pra cadastrar um webhook novo no Asaas
+  // com token proprio sem precisar descobrir nem trocar o token antigo.
   const token = String(req.headers['asaas-access-token'] || '');
-  const esperado = process.env.ASAAS_WEBHOOK_TOKEN || '';
-  const tBuf = Buffer.from(token), eBuf = Buffer.from(esperado);
-  const tokenOk = esperado.length > 0 && tBuf.length === eBuf.length && crypto.timingSafeEqual(tBuf, eBuf);
+  const aceitos = [process.env.ASAAS_WEBHOOK_TOKEN, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER]
+    .filter(function (x) { return typeof x === 'string' && x.length > 0; });
+  const tBuf = Buffer.from(token);
+  const tokenOk = aceitos.some(function (esperado) {
+    const eBuf = Buffer.from(esperado);
+    return tBuf.length === eBuf.length && crypto.timingSafeEqual(tBuf, eBuf);
+  });
   if (!tokenOk) return res.status(401).end();
 
   try {
