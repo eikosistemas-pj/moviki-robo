@@ -30,6 +30,18 @@ function limpaHorarioCfg(c){
   return { dias, abre: abre || '', fecha: fecha || '' };
 }
 
+// WhatsApp do PONTO (27/08/2026). Cada unidade Enterprise tem o proprio numero.
+// Entrada livre do lojista: aceita "(41) 99999-8888", "+55 41 99999-8888", etc.
+// Guarda so os digitos, sem o 55 do pais (a pagina publica monta o wa.me/55...).
+// String vazia = ponto sem numero proprio; a pagina publica cai no numero do negocio.
+function limpaWpp(v) {
+  if (v === null || v === undefined) return '';
+  let d = String(v).replace(/\D/g, '');
+  if (d.length > 11 && d.slice(0, 2) === '55') d = d.slice(2);
+  if (d.length !== 10 && d.length !== 11) return '';
+  return d;
+}
+
 async function ehEnterprise(uid) {
   const a = await db.collection('assinaturas').doc(uid).get();
   const d = a.exists ? a.data() : null;
@@ -77,7 +89,7 @@ module.exports = async (req, res) => {
       const qs = await col.where('ownerUid', '==', uid).get();
       const pontos = qs.docs.map(d => {
         const x = d.data();
-        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', horarioCfg: x.horarioCfg || null, ativo: x.ativo === true, cobranca: !!x.cobrancaId };
+        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', horarioCfg: x.horarioCfg || null, whatsapp: x.whatsapp || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
       });
       res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
       return;
@@ -125,6 +137,7 @@ module.exports = async (req, res) => {
 
       const horario = String(body.horario || '').trim().slice(0, 60);
       const horarioCfg = limpaHorarioCfg(body.horarioCfg);
+      const whatsapp = limpaWpp(body.whatsapp);
       const jaTem = (await col.where('ownerUid', '==', uid).get()).size;
       const extra = jaTem >= EXTRAS_INCLUSOS;
 
@@ -147,7 +160,7 @@ module.exports = async (req, res) => {
           if (sp.exists || sl.exists) throw new Error('APELIDO_EM_USO');
           const ref = col.doc();
           tx.set(ref, {
-            ownerUid: uid, nome, lat, lng, slug, horario, horarioCfg, ativo: !extra,
+            ownerUid: uid, nome, lat, lng, slug, horario, horarioCfg, whatsapp, ativo: !extra,
             criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp(),
           });
           tx.set(refP, { ownerUid: uid, pid: ref.id });
@@ -229,6 +242,9 @@ module.exports = async (req, res) => {
       }
       if (body.horario !== undefined) { patch.horario = String(body.horario || '').trim().slice(0, 60); }
       if (body.horarioCfg !== undefined) { patch.horarioCfg = limpaHorarioCfg(body.horarioCfg); }
+      // Campo vazio apaga o numero do ponto de proposito: a pagina publica volta
+      // a mostrar o WhatsApp do negocio principal naquela unidade.
+      if (body.whatsapp !== undefined) { patch.whatsapp = limpaWpp(body.whatsapp); }
       await ref.update(patch);
       res.status(200).json({ ok: true });
       return;
