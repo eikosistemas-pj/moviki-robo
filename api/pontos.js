@@ -6,6 +6,13 @@
 // Remover um ponto pago cancela a assinatura. Tudo via Admin SDK (regras write:false).
 //
 // Ações (POST body.acao): 'listar' | 'criar' | 'editar' | 'remover'
+//                          'sugestoes' | 'detalhe'  -> busca de endereço, TODOS os planos
+//
+// 31/08/2026: 'sugestoes' e 'detalhe' subiram para ANTES da trava ehEnterprise().
+// A busca de endereço agora serve também o campo "Endereço escrito" do painel
+// (qualquer plano) — ela só consulta o Google Places e não toca em pontos.
+// Virou ação daqui e não arquivo próprio porque o plano Hobby da Vercel
+// permite no máximo 12 Serverless Functions, e o projeto já está no teto.
 
 const { db, admin } = require('../lib/firebase');
 const { asaas, PONTO_EXTRA, PONTOS_INCLUSOS } = require('../lib/asaas');
@@ -78,23 +85,6 @@ module.exports = async (req, res) => {
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
     const uid = decoded.uid;
 
-    if (!(await ehEnterprise(uid))) {
-      res.status(403).json({ ok: false, erro: 'recurso do plano Enterprise', motivo: 'nao_enterprise' });
-      return;
-    }
-
-    const col = db.collection('pontos');
-
-    if (acao === 'listar') {
-      const qs = await col.where('ownerUid', '==', uid).get();
-      const pontos = qs.docs.map(d => {
-        const x = d.data();
-        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', horarioCfg: x.horarioCfg || null, whatsapp: x.whatsapp || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
-      });
-      res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
-      return;
-    }
-
     // ---- AUTOCOMPLETE DE ENDEREÇO (Google Places New) ----
     if (acao === 'sugestoes') {
       if (!GKEY) { res.status(500).json({ ok: false, erro: 'busca de lugares não configurada' }); return; }
@@ -124,6 +114,24 @@ module.exports = async (req, res) => {
       const loc = j.location || {};
       if (typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') { res.status(200).json({ ok: false, erro: 'lugar_sem_local' }); return; }
       res.status(200).json({ ok: true, lat: loc.latitude, lng: loc.longitude, endereco: j.formattedAddress || '' });
+      return;
+    }
+
+    // Daqui pra baixo e so multi-ponto: exige Enterprise.
+    if (!(await ehEnterprise(uid))) {
+      res.status(403).json({ ok: false, erro: 'recurso do plano Enterprise', motivo: 'nao_enterprise' });
+      return;
+    }
+
+    const col = db.collection('pontos');
+
+    if (acao === 'listar') {
+      const qs = await col.where('ownerUid', '==', uid).get();
+      const pontos = qs.docs.map(d => {
+        const x = d.data();
+        return { id: d.id, nome: x.nome || '', lat: x.lat, lng: x.lng, slug: x.slug || '', horario: x.horario || '', horarioCfg: x.horarioCfg || null, whatsapp: x.whatsapp || '', ativo: x.ativo === true, cobranca: !!x.cobrancaId };
+      });
+      res.status(200).json({ ok: true, pontos, inclusos: PONTOS_INCLUSOS, extrasInclusos: EXTRAS_INCLUSOS });
       return;
     }
 
