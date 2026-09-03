@@ -104,8 +104,31 @@ async function buscarInstagram(req, res) {
     || String(req.headers['x-real-ip'] || '')
     || 'desconhecido';
 
+  // MODO DIAGNOSTICO — 03/09/2026.
+  // Com ?instagram=natgeo&secret=<CRON_SECRET> a resposta traz a mensagem CRUA
+  // que a Meta devolveu, e a busca ignora o cache. Existe porque a primeira
+  // versao disto foi ao ar e devolvia "conta pessoal" pra @natgeo: o erro real
+  // era de configuracao, mas do lado de fora os dois eram indistinguiveis e
+  // nao dava pra descobrir nada sem abrir o log da Vercel.
+  // Protegido pelo CRON_SECRET (o mesmo do branch 2) — a mensagem de erro da
+  // Meta as vezes cita o nosso id, entao nao pode ficar aberta pra qualquer um.
+  const segredo = process.env.CRON_SECRET;
+  const diag = !!segredo && String(q.secret || '') === segredo;
+
   try {
-    const r = await buscarPerfil(admin, db, q.instagram, { ip });
+    const r = await buscarPerfil(admin, db, q.instagram, { ip: diag ? null : ip, semCache: diag });
+
+    if (diag) {
+      res.status(200).json({
+        diagnostico: true,
+        ok: r.ok, achou: !!r.achou, motivo: r.motivo || null,
+        metaDisse: r.detalhe || null,
+        igUserIdConfigurado: (process.env.IG_USER_ID || '(vazio)'),
+        tokenTem: (process.env.IG_TOKEN || '').length + ' caracteres',
+        nome: r.nome || null, seguidores: r.seguidores || null,
+      });
+      return;
+    }
 
     if (r.ok && r.achou) {
       res.status(200).json({
