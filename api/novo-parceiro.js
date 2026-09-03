@@ -45,6 +45,7 @@
 const { admin, db } = require('../lib/firebase');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { buscarPerfil } = require('../lib/instagram');
+const { gravarEspelho, espelharPorUid } = require('../lib/espelhoParceiro');
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
@@ -151,6 +152,42 @@ async function buscarInstagram(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Branch 3: o parceiro pede pra atualizar o proprio espelho publico.
+//
+// POR QUE ELE PRECISA EXISTIR: o espelho nasce na aprovacao, mas o campo
+// `treinado` so fica verdadeiro DEPOIS, quando ele termina as 8 aulas. Sem
+// este branch, ou o espelho ficaria eternamente desatualizado, ou o robo
+// teria que varrer todos os parceiros de tempos em tempos — leitura paga,
+// crescendo pra sempre, pra atualizar quase nada.
+//
+// Assim o custo e exato: uma leitura e uma escrita, so quando muda de verdade
+// (o painel chama ao concluir as aulas) ou quando o parceiro abre o painel e
+// ainda nao tem espelho — que e como os parceiros antigos vao sendo cobertos,
+// um por um, sem nenhuma migracao.
+//
+// Autenticado pelo idToken do PROPRIO parceiro: ele so consegue atualizar o
+// espelho dele mesmo, e o conteudo vem do banco, nunca do que ele mandou.
+// ---------------------------------------------------------------------------
+async function atualizarEspelho(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
+  try {
+    const body    = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+    const idToken = String(body.idToken || '');
+    if (!idToken) { res.status(400).json({ ok: false }); return; }
+
+    let decoded;
+    try { decoded = await admin.auth().verifyIdToken(idToken); }
+    catch (_) { res.status(200).json({ ok: false }); return; }
+
+    const r = await espelharPorUid(admin, db, decoded.uid);
+    res.status(200).json({ ok: r.ok === true, slug: r.slug || null });
+  } catch (e) {
+    console.error('[novo-parceiro] Erro inesperado no espelho:', e);
+    res.status(200).json({ ok: false });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Branch 2: varredura de pendentes (chamada pelo agendamento externo).
 // ---------------------------------------------------------------------------
 async function processarPendentes(req, res) {
@@ -184,6 +221,10 @@ async function processarPendentes(req, res) {
           aprovadoEm: admin.firestore.FieldValue.serverTimestamp(),
           aprovadoPor: 'automatico',
         });
+
+        // Publica o espelho de verificacao assim que ele passa a valer.
+        try{ await gravarEspelho(admin, db, Object.assign({}, p, { status:'aprovado' })); }
+        catch(e){ console.error('[novo-parceiro] espelho falhou (segue normal):', e); }
 
         let boasVindasOk = null;
         try {
@@ -236,6 +277,7 @@ module.exports = async (req, res) => {
   const q = req.query || {};
   if (String(q.processarPendentes || '') === '1') { await processarPendentes(req, res); return; }
   if (String(q.instagram || '') !== '')           { await buscarInstagram(req, res);    return; }
+  if (String(q.espelho || '') === '1')            { await atualizarEspelho(req, res);   return; }
 
   if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
 

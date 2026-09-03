@@ -12,6 +12,7 @@
 
 const { admin, db } = require('../lib/firebase');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
+const { gravarEspelho } = require('../lib/espelhoParceiro');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
@@ -46,6 +47,13 @@ module.exports = async (req, res) => {
 
     // 3) Guarda: só manda pra quem está APROVADO.
     if (p.status !== 'aprovado') { res.status(409).json({ ok: false, erro: 'parceiro nao aprovado' }); return; }
+
+    // 3b) Publica o espelho de verificacao (moviki.com.br/v/apelido).
+    // Roda ANTES do e-mail de proposito: o e-mail de boas-vindas ja aponta o
+    // parceiro pro proprio link, e chegar nele com a pagina de verificacao
+    // ainda vazia seria a pior primeira impressao possivel.
+    // Nao lanca e nao interrompe: espelho e vitrine, e-mail e o que importa.
+    await gravarEspelho(admin, db, p);
 
     // 4) Monta e envia (forcar=true ignora boasVindasEnviadoEm e reenvia mesmo assim).
     const r = await enviarBoasVindasParceiro({ admin, parceiroRef, p, forcar });
