@@ -1,8 +1,15 @@
 // api/novo-parceiro.js  (repo: moviki-robo)
 //
-// Tem DOIS papéis nesse arquivo (consolidados aqui de propósito — o plano
-// Hobby da Vercel só permite 12 funções em /api, então não criamos um
-// endpoint novo pra isso, ver Mapa Mestre seção 1):
+// Tem TRÊS papéis nesse arquivo (consolidados aqui de propósito — o plano
+// Hobby da Vercel só permite 12 funções em /api, o repo ESTÁ no teto, então
+// não criamos um endpoint novo pra isso, ver Mapa Mestre seção 1):
+//
+// 0) GET ?instagram=<arroba> — SEM login, chamado pelo quiz enquanto o
+//    influenciador digita o @ dele. Devolve a foto, o nome e o número de
+//    seguidores pra tela mostrar o cartão "é você?". É só vitrine: NADA do
+//    que sai daqui é gravado a partir do que o navegador manda de volta.
+//    Sem login porque na hora que ele digita o @ ele ainda não tem conta —
+//    por isso o freio por IP e o teto diário, dentro de lib/instagram.js.
 //
 // 1) POST { idToken, uid } — chamado pelo cliente (index.html) logo após o
 //    cadastro do parceiro. Confirma o cadastro pendente e avisa no Telegram.
@@ -31,9 +38,13 @@
 //   TELEGRAM_CHAT_ID         -> seu chat_id no Telegram
 //   RESEND_API_KEY           -> e-mail de boas-vindas (via lib/boasVindasParceiro.js)
 //   CRON_SECRET              -> autoriza o branch (2) [já existe, usado por lembrete-trial.js]
+//   IG_USER_ID + IG_TOKEN    -> busca do @ do Instagram (via lib/instagram.js).
+//                               Faltando qualquer um dos dois, o branch (0)
+//                               devolve "sem_config" e o quiz segue sem cartão.
 
 const { admin, db } = require('../lib/firebase');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
+const { buscarPerfil } = require('../lib/instagram');
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
@@ -71,6 +82,48 @@ async function lerAutoAprovacao() {
   } catch (e) {
     console.error('[novo-parceiro] Falha ao ler configuracoes/sistema, seguindo manual:', e);
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Branch 0: busca do @ do Instagram durante o quiz. SEM login.
+//
+// Responde sempre 200, sempre com JSON, mesmo quando não achou ou quando o
+// token da Meta está errado. O motivo é de produto, não de código: este é o
+// único trecho do cadastro que depende de um serviço de fora, e ele fica no
+// MEIO do formulário. Se ele devolvesse 4xx/5xx, o cartão sumiria e a tela
+// pareceria quebrada bem na hora de fechar o cadastro. Falhou = o campo do @
+// vira um campo de texto comum, e ninguém perde o cadastro por causa disso.
+// ---------------------------------------------------------------------------
+async function buscarInstagram(req, res) {
+  const q = req.query || {};
+
+  // IP real por trás da CDN da Vercel. x-forwarded-for vem como
+  // "cliente, proxy1, proxy2" — o primeiro é quem interessa.
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || String(req.headers['x-real-ip'] || '')
+    || 'desconhecido';
+
+  try {
+    const r = await buscarPerfil(admin, db, q.instagram, { ip });
+
+    if (r.ok && r.achou) {
+      res.status(200).json({
+        ok: true, achou: true,
+        arroba: r.arroba, nome: r.nome, foto: r.foto,
+        seguidores: r.seguidores, posts: r.posts, verificado: r.verificado,
+      });
+      return;
+    }
+
+    // achou:false e todos os erros saem iguais pro navegador de propósito:
+    // a tela não tem o que fazer de diferente com "conta pessoal" ou "token
+    // vencido" — nos dois casos ela some com o cartão e aceita o @ digitado.
+    // O motivo vai junto só pra aparecer no log do navegador em teste.
+    res.status(200).json({ ok: true, achou: false, motivo: r.motivo || 'nao_achei' });
+  } catch (e) {
+    console.error('[novo-parceiro] Erro inesperado na busca do Instagram:', e);
+    res.status(200).json({ ok: true, achou: false, motivo: 'falha' });
   }
 }
 
@@ -159,6 +212,7 @@ module.exports = async (req, res) => {
 
   const q = req.query || {};
   if (String(q.processarPendentes || '') === '1') { await processarPendentes(req, res); return; }
+  if (String(q.instagram || '') !== '')           { await buscarInstagram(req, res);    return; }
 
   if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
 
@@ -185,6 +239,53 @@ module.exports = async (req, res) => {
     const nome = p.nome || 'Parceiro sem nome';
     const slug = p.slug || '';
 
+    // 2b) CARIMBO DO INSTAGRAM (Regra de Ouro #1: dado de valor é escrito pelo
+    // servidor, nunca pelo navegador).
+    //
+    // O quiz já mostrou o cartão com a foto e os seguidores pro influenciador
+    // confirmar — mas AQUELE número veio pro navegador dele, e tudo que passa
+    // pelo navegador é forjável no F12. Se a gente gravasse o que o cliente
+    // manda, qualquer parceiro se cadastraria com 500 mil seguidores e o
+    // painel do dono viraria ficção. Então o robô busca DE NOVO, aqui, pelo
+    // Admin SDK, e grava o que a própria Meta respondeu.
+    //
+    // Sai barato: lib/instagram.js tem cache de 7 dias e esse mesmo @ acabou
+    // de ser consultado no quiz, segundos atrás — na prática isso é uma
+    // leitura de cache, não uma chamada nova pra Meta.
+    //
+    // semFoto: o cadastro do parceiro não guarda imagem. A foto existe pro
+    // cartão do quiz e vive no cache; pendurar base64 em parceiros/{uid} só
+    // engordaria o documento à toa.
+    //
+    // Nada aqui derruba o cadastro: se a Meta estiver fora, o parceiro fica
+    // sem os campos ig* e o resto do fluxo segue idêntico.
+    let ig = null;
+    if (p.arroba) {
+      try {
+        const r = await buscarPerfil(admin, db, p.arroba, { semFoto: true });
+        if (r.ok && r.achou) {
+          ig = r;
+          await parceiroRef.update({
+            igNome:        r.nome || '',
+            igSeguidores:  Number(r.seguidores || 0),
+            igPosts:       Number(r.posts || 0),
+            igVerificado:  r.verificado === true,
+            igConferidoEm: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (e) {
+        console.error('[novo-parceiro] Falha ao carimbar o Instagram (segue normal):', e);
+      }
+    }
+
+    // Linha do Instagram no aviso do Telegram. É o dado que mais importa pra
+    // decidir aprovar na hora ou olhar com calma: 200 seguidores e 80 mil
+    // seguidores são dois parceiros bem diferentes chegando.
+    const linhaIg = ig
+      ? '@' + ig.arroba + (ig.verificado ? ' ✔️' : '') +
+        ' — ' + Number(ig.seguidores || 0).toLocaleString('pt-BR') + ' seguidores\n'
+      : (p.arroba ? String(p.arroba) + ' (não confirmado no Instagram)\n' : '');
+
     // A aprovação automática NÃO acontece mais aqui na hora — só fica marcada
     // no aviso do Telegram. Quem de fato aprova (respeitando o tempo mínimo
     // de análise) é a varredura do branch 2, chamada pelo agendamento externo.
@@ -193,11 +294,13 @@ module.exports = async (req, res) => {
     const texto = auto
       ? '🔔 Novo parceiro no Moviki!\n\n' +
         'Nome: ' + nome + '\n' +
+        linhaIg +
         (slug ? 'Apelido: /p/' + slug + '\n' : '') +
         'Status: pendente ⏳ (aprovação automática entra em até ' + DELAY_MIN_MINUTOS + ' min)\n\n' +
         'Ver no painel:\n' + PAINEL_URL
       : '🔔 Novo parceiro no Moviki!\n\n' +
         'Nome: ' + nome + '\n' +
+        linhaIg +
         (slug ? 'Apelido: /p/' + slug + '\n' : '') +
         'Status: pendente ⏳\n\n' +
         'Aprovar agora:\n' + PAINEL_URL;
