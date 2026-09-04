@@ -7,12 +7,40 @@
 // Envs necessárias no Vercel (projeto moviki-robo) — já existem:
 //   TELEGRAM_TOKEN    -> token do bot (do @BotFather)
 //   TELEGRAM_CHAT_ID  -> seu chat_id no Telegram
+//
+// -------------------------------------------------------------------------
+// REVISAO 04/09/2026 — atribuicao do Lead ao anuncio.
+//
+// O Lead ja era disparado desde 27/08 e chegava na Meta como "processado" —
+// mas sem o parametro do clique. A Meta nao tinha como ligar aquele cadastro
+// a um anuncio, entao a campanha marcava zero conversao mesmo com a CAPI no ar.
+//
+// Agora a chamada do painel traz fbc/fbp (injetados pelo mvmetrica.js, que
+// guarda o identificador do clique em sessionStorage e o carrega no salto de
+// moviki.com.br pra app.moviki.com.br) e o IP do cliente sai do proprio req.
+//
+// Todos os tres sao OPCIONAIS: cadastro organico chega sem fbc e o Lead vai do
+// mesmo jeito, so sem credito de campanha. Nada aqui pode barrar um cadastro.
+// -------------------------------------------------------------------------
 
 const { admin, db } = require('../lib/firebase');
 const meta = require('../lib/meta');
 
 const ORIGIN_OK   = 'https://app.moviki.com.br';
 const PAINEL_DONO = 'https://app.moviki.com.br/eikoadm01.html';
+
+// IP real do visitante. Na Vercel o cliente vem no x-forwarded-for; os outros
+// dois sao reserva. Cabecalho e dado do cliente, entao o lib/meta.js valida o
+// formato antes de mandar — lixo aqui nao vira lixo no conjunto de dados.
+function ipDoCliente(req) {
+  const h = (req && req.headers) || {};
+  return String(
+    h['x-forwarded-for'] ||
+    h['x-real-ip'] ||
+    h['x-vercel-forwarded-for'] ||
+    ''
+  );
+}
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', ORIGIN_OK);
@@ -55,11 +83,16 @@ module.exports = async (req, res) => {
     // suficiente pra campanha otimizar — Purchase sozinho nao sai do aprendizado.
     // O agente de usuario vem da propria chamada do painel: a Meta exige esse
     // dado em evento marcado como 'website', e aqui existe navegador de verdade.
+    // fbc/fbp vem do mvmetrica.js e sao o que liga o cadastro ao anuncio.
     try {
       await meta.lead({
         uid, email,
         origem: 'cadastro_comerciante',
         agenteUsuario: String(req.headers['user-agent'] || ''),
+        ip: ipDoCliente(req),
+        fbc: String(body.fbc || ''),
+        fbp: String(body.fbp || ''),
+        origemUrl: String(body.origemUrl || ''),
       });
     }
     catch (_) {}
@@ -69,10 +102,15 @@ module.exports = async (req, res) => {
     const CHAT  = process.env.TELEGRAM_CHAT_ID;
     if (!TOKEN || !CHAT) { res.status(200).json({ ok: false, motivo: 'sem_config' }); return; }
 
+    // Saber que o cadastro veio de anuncio, no proprio aviso, evita ter que
+    // abrir o Gerenciador pra descobrir se a campanha esta entregando gente.
+    const veioDeAnuncio = /^fb\.\d\.\d+\./.test(String(body.fbc || ''));
+
     const texto =
       '🛍️ Novo comerciante no Moviki!\n\n' +
       (nome  ? ('Negócio: ' + nome + '\n')  : '') +
       (email ? ('E-mail: '  + email + '\n') : '') +
+      (veioDeAnuncio ? 'Origem: anúncio da Meta 📣\n' : '') +
       'Acabou de criar a conta ✨\n\n' +
       'Ver no painel:\n' + PAINEL_DONO;
 
@@ -85,7 +123,13 @@ module.exports = async (req, res) => {
     } catch (_) {}
 
     // 5) Marca como avisado (Admin SDK — não passa pelas regras do cliente).
-    try { await avisoRef.set({ email, nome, avisadoEm: admin.firestore.FieldValue.serverTimestamp() }); } catch (_) {}
+    try {
+      await avisoRef.set({
+        email, nome,
+        origemAnuncio: veioDeAnuncio,
+        avisadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
 
     res.status(200).json({ ok: true });
   } catch (e) {
