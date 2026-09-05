@@ -21,6 +21,20 @@
 //
 // Todos os tres sao OPCIONAIS: cadastro organico chega sem fbc e o Lead vai do
 // mesmo jeito, so sem credito de campanha. Nada aqui pode barrar um cadastro.
+//
+// -------------------------------------------------------------------------
+// REVISAO 05/09/2026 — O AVISO PASSA A DIZER SE A MEDICAO SAIU.
+//
+// O DEFEITO: em 05/09 um cadastro de teste passou, o aviso veio com "Origem:
+// anuncio da Meta" e o Gerenciador de Eventos ficou VAZIO. Os dois fatos
+// convivem porque o lib/meta.js falha calado (medicao nunca derruba cadastro)
+// e esta funcao JOGAVA FORA o retorno dele. Saber que o cadastro entrou nao e
+// a mesma coisa que saber que ele foi medido — e a diferenca so aparecia dias
+// depois, no Gerenciador, com verba de campanha ja gasta.
+//
+// AGORA o aviso traz o motivo: enviada, sem env, recusada pela Meta com o
+// codigo HTTP, ou tempo esgotado. O log continua igual; isto e para o motivo
+// chegar a quem consegue agir sem abrir painel de servidor.
 // -------------------------------------------------------------------------
 
 const { admin, db } = require('../lib/firebase');
@@ -84,6 +98,7 @@ module.exports = async (req, res) => {
     // O agente de usuario vem da propria chamada do painel: a Meta exige esse
     // dado em evento marcado como 'website', e aqui existe navegador de verdade.
     // fbc/fbp vem do mvmetrica.js e sao o que liga o cadastro ao anuncio.
+    let medicao = '';
     try {
       await meta.lead({
         uid, email,
@@ -94,8 +109,11 @@ module.exports = async (req, res) => {
         fbp: String(body.fbp || ''),
         origemUrl: String(body.origemUrl || ''),
       });
+      medicao = meta.ultimoTexto ? meta.ultimoTexto() : '';
     }
-    catch (_) {}
+    catch (e) {
+      medicao = 'Medicao: FALHOU — ' + ((e && e.message) ? String(e.message).slice(0,120) : 'erro');
+    }
 
     // 4) Manda o aviso no Telegram.
     const TOKEN = process.env.TELEGRAM_TOKEN;
@@ -106,11 +124,19 @@ module.exports = async (req, res) => {
     // abrir o Gerenciador pra descobrir se a campanha esta entregando gente.
     const veioDeAnuncio = /^fb\.\d\.\d+\./.test(String(body.fbc || ''));
 
+    /* A linha da medicao so entra quando ha o que dizer. Quando o envio deu
+       certo ela e discreta; quando falhou, ela grita — e e assim que se
+       descobre medicao quebrada no mesmo dia, e nao na semana seguinte. */
+    const linhaMedicao = medicao
+      ? ((medicao.indexOf('enviada') > -1 ? '✅ ' : '⚠️ ') + medicao + '\n')
+      : '';
+
     const texto =
       '🛍️ Novo comerciante no Moviki!\n\n' +
       (nome  ? ('Negócio: ' + nome + '\n')  : '') +
       (email ? ('E-mail: '  + email + '\n') : '') +
       (veioDeAnuncio ? 'Origem: anúncio da Meta 📣\n' : '') +
+      linhaMedicao +
       'Acabou de criar a conta ✨\n\n' +
       'Ver no painel:\n' + PAINEL_DONO;
 
