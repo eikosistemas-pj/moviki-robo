@@ -22,10 +22,97 @@ const DIAS_RETENCAO_COMISSAO = 7;
 
 // ==========================================================
 //  PROGRAMA DE PARCEIROS — cálculo de comissão
-//  N1 = 15% recorrente (todo pagamento). N2 = 7,5% e N3 = 5%
+//  N1 = recorrente em TODO pagamento — 15% no Bronze/Prata, 16% no Ouro,
+//  17% no Diamante e 18% no Esmeralda (ver NIVEIS_PARCEIRO). N2 = 7,5% e N3 = 5%
 //  SÓ no 1º pagamento do lojista (bônus único). Só acumula pra
 //  parceiro APROVADO. Base = valor realmente pago.
 // ==========================================================
+
+// ==========================================================
+//  PLANO DE NÍVEIS DO PARCEIRO — 10/09/2026
+//  O nível conta SÓ cliente direto (nível 1) que pagou a mensalidade no mês
+//  corrente. Indireto não conta — contar rede seria classificar por tamanho
+//  de downline, e não é isso que o programa é.
+//  O nível é recalculado a cada pagamento: sobe quando o cliente paga e cai
+//  sozinho no mês seguinte se o cliente parar de pagar.
+//  A MESMA tabela existe em parceiro.html e no regulamento.html — mexeu aqui,
+//  mexe nos dois.
+// ==========================================================
+const NIVEIS_PARCEIRO = [
+  { chave: 'bronze',    nome: 'Bronze',    min: 1,   pct: 0.15, marco: 0   },
+  { chave: 'prata',     nome: 'Prata',     min: 11,  pct: 0.15, marco: 25  },
+  { chave: 'ouro',      nome: 'Ouro',      min: 26,  pct: 0.16, marco: 50  },
+  { chave: 'diamante',  nome: 'Diamante',  min: 51,  pct: 0.17, marco: 150 },
+  { chave: 'esmeralda', nome: 'Esmeralda', min: 101, pct: 0.18, marco: 300 },
+];
+const PCT_N1_BASE = 0.15;
+
+function nivelPorAtivos(ativos) {
+  let atual = null;
+  for (const n of NIVEIS_PARCEIRO) { if (ativos >= n.min) atual = n; }
+  return atual;
+}
+
+// Quantos clientes DIRETOS deste parceiro pagaram na competência (AAAA-MM),
+// contando o lojista do pagamento em curso. Qualquer falha -> nível base:
+// perder o degrau numa falha rara é melhor que travar o pagamento.
+async function contarAtivosDoMes(parceiroUid, competencia, lojistaUidAtual) {
+  const vistos = new Set();
+  if (lojistaUidAtual) vistos.add(lojistaUidAtual);
+  try {
+    const r = await db.collection('comissoes')
+      .where('parceiroUid', '==', parceiroUid)
+      .where('competencia', '==', competencia)
+      .limit(1000).get();
+    r.forEach((d) => {
+      const c = d.data() || {};
+      if (Number(c.nivel) === 1 && !c.estornada && c.lojistaUid) vistos.add(c.lojistaUid);
+    });
+  } catch (e) {
+    console.error('contarAtivosDoMes erro (usando nível base):', e);
+  }
+  return vistos.size;
+}
+
+// Bônus de marco: pago UMA vez, na primeira vez que o parceiro alcança o
+// degrau. Id determinístico -> o .create() barra repetição para sempre,
+// inclusive se ele cair de nível e voltar.
+async function creditarMarco(parceiroUid, parceiroSlug, nivel, competencia) {
+  if (!nivel || !(nivel.marco > 0)) return;
+  const id = 'marco_' + parceiroUid + '_' + nivel.chave;
+  try {
+    await db.collection('comissoes').doc(id).create({
+      parceiroUid: parceiroUid,
+      parceiroSlug: parceiroSlug,
+      lojistaUid: '',
+      nivel: 0,                 // 0 = não é comissão de indicação; não conta pro nível
+      tipo: 'marco',
+      nivelParceiro: nivel.chave,
+      base: 0,
+      percentual: 0,
+      valor: nivel.marco,
+      payId: '',
+      competencia: competencia,
+      pago: false,
+      estornada: false,
+      criadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      liberaEm: admin.firestore.Timestamp.fromMillis(Date.now() + DIAS_RETENCAO_COMISSAO * 86400000),
+    });
+  } catch (e) { /* já recebeu este marco -> ignora */ }
+}
+
+// Guarda o nível no cadastro do parceiro, pro painel do dono e pro crachá
+// lerem sem precisar contar de novo. Falha aqui não afeta a comissão.
+async function guardarNivel(parceiroUid, nivel, ativos) {
+  try {
+    await db.collection('parceiros').doc(parceiroUid).set({
+      nivel: nivel ? nivel.chave : '',
+      nivelNome: nivel ? nivel.nome : '',
+      nivelAtivos: ativos,
+      nivelAtualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  } catch (e) { console.error('guardarNivel erro:', e); }
+}
 
 // Resolve um apelido de parceiro (slug) -> { uid, data } do parceiro, ou null.
 async function resolverParceiro(slug) {
@@ -123,8 +210,16 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   // Nível 1 (recorrente)
   const p1 = await resolverParceiro(slug1);
   if (p1 && p1.data.status === 'aprovado' && await parceiroPodeGanhar(p1.uid)) {
-    await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: 0.15, payId, competencia });
+    // Nível do parceiro NESTE pagamento (conta o cliente que está pagando agora).
+    // O percentual aplicado é o do nível no momento em que a mensalidade entra;
+    // comissões já creditadas antes no mesmo mês não são recalculadas.
+    const ativos = await contarAtivosDoMes(p1.uid, competencia, lojistaUid);
+    const nv = nivelPorAtivos(ativos);
+    const pct1 = nv ? nv.pct : PCT_N1_BASE;
+    await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: pct1, payId, competencia });
     creditados.add(p1.uid);
+    await creditarMarco(p1.uid, slug1, nv, competencia);
+    await guardarNivel(p1.uid, nv, ativos);
   }
 
   // Níveis 2 e 3 (bônus único, só no 1º pagamento)
