@@ -1,10 +1,19 @@
 // api/upload-imagem.js  (repo: moviki-robo)
 // Recebe uma imagem (base64) do painel do lojista e sobe no Firebase Storage.
-// Dois modos:
+// Três modos:
 //   - tipo 'logo' (padrão): grava a URL em negocios/{uid}.markerLogo (logo do pino).
 //   - tipo 'produto': NÃO grava nada; só devolve a URL. Quem guarda a URL no item
 //     do cardápio é o painel, na hora de salvar (a foto vive dentro do array
 //     negocios/{uid}.cardapio, então não passa por aqui pra gravar).
+//   - tipo 'parceiro' (10/09/2026): foto de perfil do PARCEIRO. NÃO vai para o
+//     Storage — fica guardada como data: URI em parceiros/{uid}.foto e é copiada
+//     na hora para o espelho público parceiros_publicos/{slug}.foto, que é o que
+//     a página moviki.com.br/v/apelido mostra quando o comerciante lê o QR Code.
+//     Mandar imagemBase64 vazio REMOVE a foto (volta a valer a do Instagram).
+//     Por que data: e não Storage está explicado em lib/espelhoParceiro.js.
+//     Por que passa pelo robô e não é gravado direto pelo painel: a regra do
+//     Firestore só deixa o parceiro mexer em nome/pix/aulas — o Admin SDK
+//     grava sem depender de publicar regra nova.
 // Segurança: o idToken identifica o lojista; ele só mexe nos dados DELE.
 // O upload usa Admin SDK (service account) — bypassa regras do Storage/Firestore.
 //
@@ -12,8 +21,13 @@
 // (IMGBB_API_KEY não é mais necessária — removida)
 
 const { db, admin } = require('../lib/firebase');
+const { espelharPorUid } = require('../lib/espelhoParceiro');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
+// Foto de perfil do parceiro: teto do texto data: que o painel manda.
+// O painel envia lado de 320px em JPEG e fica perto de 40 KB; 200 KB dá folga
+// de sobra e ainda deixa o documento longe do teto de 1 MB do Firestore.
+const MAX_FOTO_PARCEIRO = 200000;
 const MAX_B64 = 2800000; // ~2 MB de base64 (imagem já vem comprimida do navegador)
 // Bucket explícito do projeto (evita auto-detecção falhar)
 const STORAGE_BUCKET = 'moviki-app.firebasestorage.app';
@@ -30,14 +44,49 @@ module.exports = async (req, res) => {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const idToken = String(body.idToken || '');
     const imagemBase64 = String(body.imagemBase64 || '');
-    const tipo = String(body.tipo || 'logo'); // 'logo' | 'produto'
-    if (!idToken || !imagemBase64) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
+    const tipo = String(body.tipo || 'logo'); // 'logo' | 'produto' | 'parceiro'
+    const ehParceiro = tipo === 'parceiro';
+    // Foto de parceiro é o único caso em que imagem VAZIA é pedido legítimo:
+    // é assim que ele remove a foto que escolheu.
+    if (!idToken || (!imagemBase64 && !ehParceiro)) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
     if (imagemBase64.length > MAX_B64) { res.status(413).json({ ok: false, erro: 'imagem muito grande' }); return; }
 
     // Quem é o lojista?
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
+
+    // -----------------------------------------------------------------------
+    // FOTO DE PERFIL DO PARCEIRO — 10/09/2026. Não toca no Storage.
+    // -----------------------------------------------------------------------
+    if (ehParceiro) {
+      const foto = imagemBase64.trim();
+      if (foto && !/^data:image\/(jpeg|png|webp);base64,/.test(foto)) {
+        res.status(400).json({ ok: false, erro: 'formato de imagem nao aceito' }); return;
+      }
+      if (foto.length > MAX_FOTO_PARCEIRO) {
+        res.status(413).json({ ok: false, erro: 'imagem muito grande' }); return;
+      }
+
+      // Só quem TEM cadastro de parceiro. Sem esta conferência, um lojista
+      // qualquer criaria um documento de parceiro vazio só mandando uma foto.
+      const ref = db.collection('parceiros').doc(decoded.uid);
+      const snap = await ref.get();
+      if (!snap.exists) { res.status(403).json({ ok: false, erro: 'sem cadastro de parceiro' }); return; }
+
+      await ref.set({
+        foto,
+        fotoEm: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      // O espelho é o que a página do QR Code lê. Regravar aqui é o que faz a
+      // foto nova aparecer para o comerciante NA HORA, sem esperar a próxima
+      // abertura do painel.
+      const esp = await espelharPorUid(admin, db, decoded.uid);
+
+      res.status(200).json({ ok: true, foto, espelho: esp.ok === true, slug: esp.slug || null });
+      return;
+    }
 
     // tira o prefixo "data:image/...;base64," se vier
     const b64 = imagemBase64.includes(',') ? imagemBase64.split(',').pop() : imagemBase64;

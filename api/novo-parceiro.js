@@ -49,6 +49,22 @@ const { gravarEspelho, espelharPorUid } = require('../lib/espelhoParceiro');
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
+
+/* ORIGENS PERMITIDAS — 10/09/2026. ESTE ERA O BUG DA FOTO NO QR CODE.
+   Até hoje a resposta saía sempre carimbada com `app.moviki.com.br`, e só.
+   O painel do parceiro mora nesse endereço, então a foto do Instagram
+   aparecia lá — mas a página de verificação (moviki.com.br/v/apelido), que é
+   a que o comerciante abre ao ler o QR Code, mora no OUTRO endereço. O
+   navegador dele buscava a foto, recebia a resposta, via que o carimbo não
+   batia com o endereço da página e JOGAVA A RESPOSTA FORA, calado. Resultado:
+   crachá com foto de um lado, inicial do outro, sem nenhum erro na tela.
+   Agora as três casas do Moviki são reconhecidas; qualquer outro site
+   continua recebendo o carimbo antigo, ou seja, continua barrado. */
+const ORIGENS_OK = [
+  'https://app.moviki.com.br',
+  'https://moviki.com.br',
+  'https://www.moviki.com.br',
+];
 const DELAY_MIN_MINUTOS = 10; // tempo mínimo pendente antes de poder ser aprovado sozinho
 
 async function enviarTelegram(texto) {
@@ -268,7 +284,11 @@ async function processarPendentes(req, res) {
 // ---------------------------------------------------------------------------
 module.exports = async (req, res) => {
   // CORS (a página de cadastro roda em app.moviki.com.br)
-  res.setHeader('Access-Control-Allow-Origin', ORIGIN_OK);
+  const origem = String(req.headers.origin || '');
+  res.setHeader('Access-Control-Allow-Origin', ORIGENS_OK.indexOf(origem) >= 0 ? origem : ORIGIN_OK);
+  // Sem o Vary, a CDN guardaria a resposta com o carimbo de UM endereço e
+  // serviria a mesma para o outro — o bug voltaria de forma intermitente.
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
