@@ -65,7 +65,13 @@ const ORIGENS_OK = [
   'https://moviki.com.br',
   'https://www.moviki.com.br',
 ];
-const DELAY_MIN_MINUTOS = 10; // tempo mínimo pendente antes de poder ser aprovado sozinho
+/* 10/09/2026: de 10 para 5. A varredura do GitHub Actions roda de 5 em 5
+   minutos, entao esperar 10 fazia a aprovacao cair, na pratica, entre 10 e 15
+   minutos reais — tempo em que o parceiro novo fica olhando "Em analise".
+   Quem CONCLUI o treinamento nao espera relogio nenhum: entra pela segunda
+   porta, em `atualizarEspelho`. O tempo de analise existe para quem so se
+   cadastrou. */
+const DELAY_MIN_MINUTOS = 5; // tempo mínimo pendente antes de poder ser aprovado sozinho
 
 async function enviarTelegram(texto) {
   const TOKEN = process.env.TELEGRAM_TOKEN;
@@ -168,6 +174,60 @@ async function buscarInstagram(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// A APROVACAO, EM UM LUGAR SO — 10/09/2026
+//
+// Existem DUAS portas para o parceiro ser aprovado sozinho, e as duas passam
+// por aqui:
+//   1) o tempo minimo de analise (DELAY_MIN_MINUTOS), pela varredura;
+//   2) concluir o treinamento, na hora, pelo branch do espelho.
+//
+// Ter a aprovacao escrita duas vezes seria ter dois lugares para consertar o
+// mesmo defeito — e o dia em que uma delas esquecesse o espelho publico, o
+// parceiro apareceria como nao autorizado na propria pagina de verificacao.
+//
+// Regra de Ouro #1: `status` continua sendo escrito SO pelo Admin SDK, e o
+// `aulasEm` e lido do BANCO, nunca do que o navegador manda.
+// ---------------------------------------------------------------------------
+async function aprovarParceiro(parceiroRef, p, motivo) {
+  await parceiroRef.update({
+    status: 'aprovado',
+    aprovadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    aprovadoPor: motivo === 'aulas' ? 'automatico-aulas' : 'automatico',
+  });
+
+  // Publica o espelho de verificacao assim que ele passa a valer.
+  try { await gravarEspelho(admin, db, Object.assign({}, p, { status: 'aprovado' })); }
+  catch (e) { console.error('[novo-parceiro] espelho falhou (segue normal):', e); }
+
+  let boasVindasOk = null;
+  try {
+    const r = await enviarBoasVindasParceiro({
+      admin,
+      parceiroRef,
+      p: Object.assign({}, p, { status: 'aprovado' }),
+    });
+    boasVindasOk = r.ok === true;
+  } catch (e) {
+    console.error('[novo-parceiro] Erro ao enviar e-mail de boas-vindas:', e);
+    boasVindasOk = false;
+  }
+
+  const nome = p.nome || 'Parceiro sem nome';
+  const slug = p.slug || '';
+  await enviarTelegram(
+    (motivo === 'aulas'
+      ? '✅ Parceiro aprovado automaticamente (concluiu as aulas)!\n\n'
+      : '✅ Parceiro aprovado automaticamente (após período de análise)!\n\n') +
+    'Nome: ' + nome + '\n' +
+    (slug ? 'Apelido: /p/' + slug + '\n' : '') +
+    'Status: aprovado (' + (motivo === 'aulas' ? 'automático · treinamento concluído' : 'automático') + ')\n\n' +
+    'Ver no painel:\n' + PAINEL_URL
+  );
+
+  return boasVindasOk;
+}
+
+// ---------------------------------------------------------------------------
 // Branch 3: o parceiro pede pra atualizar o proprio espelho publico.
 //
 // POR QUE ELE PRECISA EXISTIR: o espelho nasce na aprovacao, mas o campo
@@ -196,7 +256,35 @@ async function atualizarEspelho(req, res) {
     catch (_) { res.status(200).json({ ok: false }); return; }
 
     const r = await espelharPorUid(admin, db, decoded.uid);
-    res.status(200).json({ ok: r.ok === true, slug: r.slug || null });
+
+    /* ---- 10/09/2026: A SEGUNDA PORTA DA APROVACAO ----
+       O painel ja chamava este endpoint no instante em que a ultima aula
+       fecha — era so para atualizar o espelho publico. Agora, se o parceiro
+       esta `pendente`, a aprovacao automatica esta ligada e o `aulasEm` esta
+       carimbado NO BANCO, ele e aprovado aqui mesmo.
+       Quem termina o treinamento nao espera relogio nenhum: o tempo de
+       analise existe para quem so se cadastrou.
+       Falha calada de proposito: se qualquer parte disso der errado, o
+       parceiro continua pendente e a varredura de 5 em 5 minutos pega ele —
+       o espelho, que e o motivo original desta chamada, ja foi gravado. */
+    let aprovado = false;
+    try {
+      const ref  = db.collection('parceiros').doc(decoded.uid);
+      const snap = await ref.get();
+      const p    = snap.exists ? (snap.data() || {}) : null;
+
+      if (p && p.status === 'pendente' && p.aulasEm) {
+        const auto = await lerAutoAprovacao();
+        if (auto) {
+          await aprovarParceiro(ref, p, 'aulas');
+          aprovado = true;
+        }
+      }
+    } catch (e) {
+      console.error('[novo-parceiro] Segunda porta (aulas) falhou, segue pendente:', e);
+    }
+
+    res.status(200).json({ ok: r.ok === true, slug: r.slug || null, aprovado });
   } catch (e) {
     console.error('[novo-parceiro] Erro inesperado no espelho:', e);
     res.status(200).json({ ok: false });
@@ -228,45 +316,21 @@ async function processarPendentes(req, res) {
     for (const doc of snap.docs) {
       const p = doc.data() || {};
       const criadoMs = p.criadoEm && typeof p.criadoEm.toMillis === 'function' ? p.criadoEm.toMillis() : 0;
-      if (!criadoMs || criadoMs > limite) continue; // ainda não passou o tempo mínimo
+
+      /* 10/09/2026: quem CONCLUIU as aulas entra mesmo antes do tempo minimo.
+         E a rede de seguranca da segunda porta: se a chamada instantanea do
+         painel falhou (internet caiu no meio da ultima aula), a varredura
+         seguinte aprova assim mesmo — em vez de deixar o parceiro esperando
+         um relogio que, para ele, ja nao faz sentido nenhum. */
+      const concluiu = !!p.aulasEm;
+      if (!concluiu && (!criadoMs || criadoMs > limite)) continue; // ainda não passou o tempo mínimo
 
       const parceiroRef = doc.ref;
       try {
-        await parceiroRef.update({
-          status: 'aprovado',
-          aprovadoEm: admin.firestore.FieldValue.serverTimestamp(),
-          aprovadoPor: 'automatico',
-        });
-
-        // Publica o espelho de verificacao assim que ele passa a valer.
-        try{ await gravarEspelho(admin, db, Object.assign({}, p, { status:'aprovado' })); }
-        catch(e){ console.error('[novo-parceiro] espelho falhou (segue normal):', e); }
-
-        let boasVindasOk = null;
-        try {
-          const r = await enviarBoasVindasParceiro({
-            admin,
-            parceiroRef,
-            p: Object.assign({}, p, { status: 'aprovado' }),
-          });
-          boasVindasOk = r.ok === true;
-        } catch (e) {
-          console.error('[novo-parceiro] Erro ao enviar e-mail de boas-vindas (varredura):', e);
-          boasVindasOk = false;
-        }
-
-        const nome = p.nome || 'Parceiro sem nome';
-        const slug = p.slug || '';
-        await enviarTelegram(
-          '✅ Parceiro aprovado automaticamente (após período de análise)!\n\n' +
-          'Nome: ' + nome + '\n' +
-          (slug ? 'Apelido: /p/' + slug + '\n' : '') +
-          'Status: aprovado (automático)\n\n' +
-          'Ver no painel:\n' + PAINEL_URL
-        );
+        const boasVindasOk = await aprovarParceiro(parceiroRef, p, concluiu ? 'aulas' : 'tempo');
 
         processados++;
-        detalhes.push({ uid: doc.id, boasVindas: boasVindasOk });
+        detalhes.push({ uid: doc.id, boasVindas: boasVindasOk, por: concluiu ? 'aulas' : 'tempo' });
       } catch (e) {
         console.error('[novo-parceiro] Falha ao aprovar', doc.id, e);
       }
