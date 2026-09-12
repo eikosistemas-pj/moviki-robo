@@ -1,4 +1,4 @@
-// api/pontos.js  (repo: moviki-robo)
+// api/pontos.js  (repo: moviki-robo) | versao 2026-09-11-checkout1
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
 // O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
 // cobrança. O 3º adicional (4º no total) cria uma assinatura recorrente de
@@ -16,6 +16,9 @@
 
 const { db, admin } = require('../lib/firebase');
 const { asaas, PONTO_EXTRA, PONTOS_INCLUSOS } = require('../lib/asaas');
+// 11/09/2026: checkout Pix da live (Enterprise) entra como ETAPA daqui — o
+// projeto esta no teto de 12 funcoes. Acoes 'loja_*' e 'compra_*'.
+const checkout = require('../lib/checkout');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const GKEY = process.env.GOOGLE_MAPS_KEY; // autocomplete de endereço (Google Places)
@@ -66,8 +69,15 @@ async function pegarInvoiceUrl(subId) {
   return url;
 }
 
+// O site (moviki.com.br) passou a chamar este endpoint para a COMPRA da live.
+// As acoes antigas continuam exigindo idToken, entao liberar a origem do site
+// no CORS nao abre nada que ja nao estivesse fechado pelo login.
+const ORIGENS_OK = [ORIGIN_OK, 'https://moviki.com.br', 'https://www.moviki.com.br'];
+
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', ORIGIN_OK);
+  const _orig = String(req.headers.origin || '');
+  res.setHeader('Access-Control-Allow-Origin', ORIGENS_OK.indexOf(_orig) >= 0 ? _orig : ORIGIN_OK);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -78,6 +88,7 @@ module.exports = async (req, res) => {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const idToken = String(body.idToken || '');
     const acao = String(body.acao || '');
+    if (checkout.ehAcao(acao)) { await checkout.tratar(req, res, body); return; }
     if (!idToken) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
 
     let decoded;

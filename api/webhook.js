@@ -1,3 +1,4 @@
+// versao 2026-09-11-checkout1 (desvio dos pedidos da live antes de tudo)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
 // Aqui a gente LIGA o plano quando o pagamento entra e DESLIGA quando vence
@@ -8,6 +9,8 @@ const { PLANOS } = require('../lib/asaas');
 const crypto = require('crypto');
 const ga = require('../lib/ga');
 const meta = require('../lib/meta');
+// 11/09/2026: pedidos pagos na live (checkout Pix das subcontas Enterprise).
+const checkout = require('../lib/checkout');
 
 // Pagamento entrou -> liga o plano
 const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
@@ -434,7 +437,7 @@ module.exports = async (req, res) => {
   // webhook de transferencias. Assim da pra cadastrar um webhook novo no Asaas
   // com token proprio sem precisar descobrir nem trocar o token antigo.
   const token = String(req.headers['asaas-access-token'] || '');
-  const aceitos = [process.env.ASAAS_WEBHOOK_TOKEN, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER]
+  const aceitos = [process.env.ASAAS_WEBHOOK_TOKEN, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER, process.env.ASAAS_WEBHOOK_TOKEN_PEDIDOS]
     .filter(function (x) { return typeof x === 'string' && x.length > 0; });
   const tBuf = Buffer.from(token);
   const tokenOk = aceitos.some(function (esperado) {
@@ -460,6 +463,17 @@ module.exports = async (req, res) => {
 
     const pay = evento.payment || {};
     const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
+
+    // PEDIDO DA LIVE (11/09/2026): externalReference = "pedido:<id>". Vem do
+    // webhook das SUBCONTAS dos lojistas. Tem que ser tratado AQUI, antes de
+    // tudo: sem este desvio, o codigo de baixo leria o "pedido:..." como uid
+    // e gravaria uma assinatura falsa em assinaturas/{pedido:...}.
+    if (typeof uid === 'string' && uid.startsWith('pedido:')) {
+      try {
+        const r = await checkout.webhookPedido(tipo, pay);
+        return res.status(200).json(Object.assign({ ok: true }, r));
+      } catch (pe) { console.error('pedido webhook erro:', pe); return res.status(500).json({ erro: pe.message }); }
+    }
 
     // Ponto extra do Enterprise: externalReference = "ponto:<pid>".
     // Liga/desliga só o ponto (pontos/{pid}.ativo) — NÃO mexe em plano nem comissão.
