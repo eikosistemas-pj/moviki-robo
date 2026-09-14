@@ -1,4 +1,4 @@
-// versao 2026-09-11-checkout1 (desvio dos pedidos da live antes de tudo)
+// versao 2026-09-14-fila1 (evento bruto guardado, sempre 200, reprocessamento proprio)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
 // Aqui a gente LIGA o plano quando o pagamento entra e DESLIGA quando vence
@@ -427,15 +427,160 @@ async function tratarTransferencia(tipo, tr) {
   return { emAndamento: true };
 }
 
+/* ===========================================================================
+   ENTREGA "PELO MENOS UMA VEZ" E FILA QUE NAO PODE PAUSAR — 14/09/2026
+   Doutrina de Seguranca Financeira, artigo 6.
+
+   O Asaas entrega webhook em modelo at-least-once: o MESMO evento chega mais
+   de uma vez, e isso e normal. Pior: ele considera falha TUDO que nao for 200
+   e, depois de 15 falhas seguidas, PAUSA a fila daquele webhook. Fila pausada
+   significa plano que nao liga, comissao que nao credita e pedido preso em
+   "aguardando" — tudo calado, ate alguem reparar. Os eventos guardados somem
+   em 14 dias.
+
+   O desenho anterior devolvia 500 para o Asaas tentar de novo. Isso funciona
+   para uma falha isolada e e exatamente o pior caminho para uma falha
+   sistematica: 15 eventos seguidos com erro derrubam a fila inteira.
+
+   Agora:
+     1) o evento BRUTO e gravado primeiro, em webhook_eventos/{id}, com create;
+     2) evento ja processado com sucesso responde 200 e sai — idempotencia de
+        primeira camada, alem da que cada gravacao ja tem;
+     3) o processamento roda; deu erro, o documento fica marcado como 'erro',
+        o dono recebe aviso no Telegram na hora e a resposta continua sendo 200;
+     4) quem tenta de novo e o NOSSO cron (api/webhook-reprocessa.js), de hora
+        em hora, e nao o Asaas. A rede de seguranca passou a ser nossa e
+        visivel, em vez de depender de uma fila que pausa em silencio.
+
+   Token invalido continua respondendo 401: essa e a barreira, nao um erro de
+   processamento.
+=========================================================================== */
+
+const EVENTOS_COL = 'webhook_eventos';
+const RETOMAR_PROCESSANDO_MS = 3 * 60000;  // travado ha mais de 3 min -> tenta de novo
+
+function idDoEvento(evento) {
+  const bruto = String((evento && evento.id) || '').trim();
+  if (bruto && /^[A-Za-z0-9:_.-]{6,200}$/.test(bruto)) return bruto;
+  // Sem id utilizavel no payload: chave deterministica pelo conteudo, para que
+  // o reenvio do mesmo evento caia no MESMO documento.
+  const base = JSON.stringify({
+    e: (evento && evento.event) || null,
+    p: (evento && evento.payment && evento.payment.id) || null,
+    t: (evento && evento.transfer && evento.transfer.id) || null,
+    s: (evento && evento.payment && evento.payment.status) || null,
+    d: (evento && evento.dateCreated) || null,
+  });
+  return 'h_' + crypto.createHash('sha256').update(base).digest('hex').slice(0, 40);
+}
+
+// Aviso imediato ao dono. Nunca derruba o webhook.
+async function avisarDono(texto) {
+  const TOKEN = process.env.TELEGRAM_TOKEN;
+  const CHAT = process.env.TELEGRAM_CHAT_ID;
+  if (!TOKEN || !CHAT) return;
+  try {
+    await fetch('https://api.telegram.org/bot' + TOKEN + '/sendMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT, text: texto, disable_web_page_preview: true }),
+    });
+  } catch (_) {}
+}
+
+/* Miolo do webhook, isolado do req/res de proposito: o reprocessador chama
+   esta mesma funcao. Erro aqui SOBE — quem decide o que fazer com ele e quem
+   chamou. */
+async function processarEvento(evento) {
+  const tipo = evento.event;
+
+  // Evento de TRANSFERENCIA (Pix de comissao saindo daqui).
+  if (evento.transfer || String(tipo || '').indexOf('TRANSFER_') === 0) {
+    const r = await tratarTransferencia(tipo, evento.transfer || {});
+    return Object.assign({ ok: true, tratado: 'transferencia' }, r);
+  }
+
+  const pay = evento.payment || {};
+  const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
+
+  // PEDIDO (11/09/2026): externalReference = "pedido:<id>". Tem que ser tratado
+  // AQUI, antes de tudo: sem este desvio, o codigo de baixo leria o "pedido:..."
+  // como uid e gravaria uma assinatura falsa em assinaturas/{pedido:...}.
+  if (typeof uid === 'string' && uid.startsWith('pedido:')) {
+    const r = await checkout.webhookPedido(tipo, pay);
+    return Object.assign({ ok: true, tratado: 'pedido' }, r);
+  }
+
+  // Ponto extra do Enterprise: externalReference = "ponto:<pid>".
+  // Liga/desliga so o ponto (pontos/{pid}.ativo) — NAO mexe em plano nem comissao.
+  if (typeof uid === 'string' && uid.startsWith('ponto:')) {
+    const pid = uid.slice(6);
+    if (!pid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
+      return { ok: true, ignorado: true };
+    }
+    const ativo = LIGA.includes(tipo);
+    await db.collection('pontos').doc(pid).set({
+      ativo,
+      atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { ok: true, ponto: pid, ativo };
+  }
+
+  // Evento que nao interessa ou sem uid.
+  if (!uid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
+    return { ok: true, ignorado: true };
+  }
+
+  const ref = db.collection('assinaturas').doc(uid);
+  const snap = await ref.get();
+  const periodo = (snap.exists && snap.data().periodo) || 'mensal';
+  const plano = (snap.exists && snap.data().plano) || 'pro';
+
+  if (LIGA.includes(tipo)) {
+    const dias = (PLANOS[plano] && PLANOS[plano][periodo] && PLANOS[plano][periodo].dias) || 31;
+    const vence = new Date();
+    vence.setDate(vence.getDate() + dias + 3); // +3 dias de folga
+    await ref.set({
+      ativo: true,
+      vence_em: admin.firestore.Timestamp.fromDate(vence),
+      atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Comissao do Programa de Parceiros. Roda depois da ativacao e NUNCA a
+    // derruba: se der erro no calculo, o plano do lojista ja ficou ativo.
+    try { await acumularComissoes(uid, periodo, pay); }
+    catch (ce) { console.error('comissao erro:', ce); }
+
+    // GA4 + Meta: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
+    try { await registrarPurchase(uid, plano, periodo, pay); }
+    catch (ge) { console.error('purchase medicao erro:', ge); }
+  } else {
+    await ref.set({
+      ativo: false,
+      atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Estorno ou chargeback -> anula a comissao daquele pagamento (clawback).
+    // Vencimento/exclusao comum NAO estornam comissao de meses ja pagos.
+    try {
+      if (tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') {
+        await estornarComissoes(String(pay.id || ''));
+      }
+    } catch (ce) { console.error('estorno comissao erro:', ce); }
+  }
+
+  return { ok: true, tratado: 'assinatura', uid, tipo };
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).end();
 
   // 1) Confirma que a chamada veio MESMO do Asaas: o token que a gente configura
   //    no painel do Asaas vem no header abaixo. Sem ele bater, ignora.
   // Comparacao em tempo constante pra nao vazar o token por medicao de tempo.
-  // Aceita DOIS tokens: o de sempre (cobrancas) e um segundo, opcional, para o
-  // webhook de transferencias. Assim da pra cadastrar um webhook novo no Asaas
-  // com token proprio sem precisar descobrir nem trocar o token antigo.
+  // Aceita TRES tokens: o de sempre (cobrancas), o de transferencias e o de
+  // pedidos. Assim da pra cadastrar um webhook novo no Asaas com token proprio
+  // sem precisar descobrir nem trocar o token antigo.
   const token = String(req.headers['asaas-access-token'] || '');
   const aceitos = [process.env.ASAAS_WEBHOOK_TOKEN, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER, process.env.ASAAS_WEBHOOK_TOKEN_PEDIDOS]
     .filter(function (x) { return typeof x === 'string' && x.length > 0; });
@@ -446,99 +591,61 @@ module.exports = async (req, res) => {
   });
   if (!tokenOk) return res.status(401).end();
 
+  const evento = req.body || {};
+  const eid = idDoEvento(evento);
+  const evRef = db.collection(EVENTOS_COL).doc(eid);
+  const FV = admin.firestore.FieldValue;
+
+  // 2) Persiste o evento BRUTO antes de qualquer regra de negocio. E a copia
+  //    crua que permite pericia e reprocessamento depois de um incidente.
+  let jaExiste = null;
   try {
-    const evento = req.body || {};
-    const tipo = evento.event;
+    await evRef.create({
+      evento: String(evento.event || ''),
+      payload: evento,
+      status: 'processando',
+      tentativas: 1,
+      recebidoEm: FV.serverTimestamp(),
+      atualizadoEm: FV.serverTimestamp(),
+    });
+  } catch (_) {
+    try { const s = await evRef.get(); jaExiste = s.exists ? s.data() : null; } catch (__) {}
+  }
 
-    // Evento de TRANSFERÊNCIA (Pix de comissão saindo daqui) — trata e sai.
-    if (evento.transfer || String(tipo || '').indexOf('TRANSFER_') === 0) {
-      try {
-        const r = await tratarTransferencia(tipo, evento.transfer || {});
-        return res.status(200).json(Object.assign({ ok: true }, r));
-      } catch (te) {
-        console.error('transferencia webhook erro:', te);
-        return res.status(500).json({ erro: te.message });
-      }
+  if (jaExiste) {
+    // Ja processado com sucesso: nao repete nada e responde 200.
+    if (jaExiste.status === 'ok') return res.status(200).json({ ok: true, repetido: true, id: eid });
+    // Travado em 'processando' ha pouco tempo: outra execucao esta cuidando.
+    const desde = jaExiste.atualizadoEm && jaExiste.atualizadoEm.toMillis ? jaExiste.atualizadoEm.toMillis() : 0;
+    if (jaExiste.status === 'processando' && desde && (Date.now() - desde) < RETOMAR_PROCESSANDO_MS) {
+      return res.status(200).json({ ok: true, emCurso: true, id: eid });
     }
+    try {
+      await evRef.update({ status: 'processando', tentativas: FV.increment(1), atualizadoEm: FV.serverTimestamp() });
+    } catch (__) {}
+  }
 
-    const pay = evento.payment || {};
-    const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
-
-    // PEDIDO DA LIVE (11/09/2026): externalReference = "pedido:<id>". Vem do
-    // webhook das SUBCONTAS dos lojistas. Tem que ser tratado AQUI, antes de
-    // tudo: sem este desvio, o codigo de baixo leria o "pedido:..." como uid
-    // e gravaria uma assinatura falsa em assinaturas/{pedido:...}.
-    if (typeof uid === 'string' && uid.startsWith('pedido:')) {
-      try {
-        const r = await checkout.webhookPedido(tipo, pay);
-        return res.status(200).json(Object.assign({ ok: true }, r));
-      } catch (pe) { console.error('pedido webhook erro:', pe); return res.status(500).json({ erro: pe.message }); }
-    }
-
-    // Ponto extra do Enterprise: externalReference = "ponto:<pid>".
-    // Liga/desliga só o ponto (pontos/{pid}.ativo) — NÃO mexe em plano nem comissão.
-    if (typeof uid === 'string' && uid.startsWith('ponto:')) {
-      const pid = uid.slice(6);
-      if (!pid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
-        return res.status(200).json({ ok: true, ignorado: true });
-      }
-      const ativo = LIGA.includes(tipo);
-      try {
-        await db.collection('pontos').doc(pid).set({
-          ativo,
-          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
-      } catch (e) { console.error('ponto webhook erro:', e); return res.status(500).json({ erro: e.message }); }
-      return res.status(200).json({ ok: true, ponto: pid, ativo });
-    }
-
-    // Evento que nao interessa ou sem uid: responde OK e ignora.
-    if (!uid || (!LIGA.includes(tipo) && !DESLIGA.includes(tipo))) {
-      return res.status(200).json({ ok: true, ignorado: true });
-    }
-
-    const ref = db.collection('assinaturas').doc(uid);
-    const snap = await ref.get();
-    const periodo = (snap.exists && snap.data().periodo) || 'mensal';
-    const plano = (snap.exists && snap.data().plano) || 'pro';
-
-    if (LIGA.includes(tipo)) {
-      const dias = (PLANOS[plano] && PLANOS[plano][periodo] && PLANOS[plano][periodo].dias) || 31;
-      const vence = new Date();
-      vence.setDate(vence.getDate() + dias + 3); // +3 dias de folga
-      await ref.set({
-        ativo: true,
-        vence_em: admin.firestore.Timestamp.fromDate(vence),
-        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      // Comissão do Programa de Parceiros. Roda depois da ativação e NUNCA a
-      // derruba: se der erro no cálculo, o plano do lojista já ficou ativo.
-      try { await acumularComissoes(uid, periodo, pay); }
-      catch (ce) { console.error('comissao erro:', ce); }
-
-      // GA4 + Meta: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
-      try { await registrarPurchase(uid, plano, periodo, pay); }
-      catch (ge) { console.error('purchase medicao erro:', ge); }
-    } else {
-      await ref.set({
-        ativo: false,
-        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      // Estorno ou chargeback -> anula a comissão daquele pagamento (clawback).
-      // Vencimento/exclusão comum NÃO estornam comissão de meses já pagos.
-      try {
-        if (tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') {
-          await estornarComissoes(String(pay.id || ''));
-        }
-      } catch (ce) { console.error('estorno comissao erro:', ce); }
-    }
-
-    return res.status(200).json({ ok: true });
+  // 3) Processa. Qualquer erro fica registrado e vira aviso — mas a resposta
+  //    para o Asaas continua sendo 200, para a fila nunca pausar.
+  try {
+    const r = await processarEvento(evento);
+    try { await evRef.update({ status: 'ok', resultado: r || null, concluidoEm: FV.serverTimestamp(), atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
+    return res.status(200).json(Object.assign({ ok: true, id: eid }, r || {}));
   } catch (e) {
-    // Devolve 500 pro Asaas tentar de novo (nao perder ativacao por erro nosso).
+    const msg = (e && e.message) ? String(e.message).slice(0, 400) : 'erro';
     console.error('webhook erro:', e);
-    return res.status(500).json({ erro: e.message });
+    try { await evRef.update({ status: 'erro', erro: msg, atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
+    await avisarDono(
+      '🚨 Webhook do Asaas falhou\n\n' +
+      'Evento: ' + String(evento.event || '?') + '\n' +
+      'Id: ' + eid + '\n' +
+      'Erro: ' + msg + '\n\n' +
+      'Guardado em webhook_eventos. O reprocessamento roda de hora em hora.'
+    );
+    // 200 de proposito: ver o bloco de comentario no topo desta secao.
+    return res.status(200).json({ ok: false, guardado: true, id: eid });
   }
 };
+
+module.exports.processarEvento = processarEvento;
+module.exports.EVENTOS_COL = EVENTOS_COL;
