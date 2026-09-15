@@ -1,4 +1,4 @@
-// versao 2026-09-14-fila1 (evento bruto guardado, sempre 200, reprocessamento proprio)
+// versao 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
 // Aqui a gente LIGA o plano quando o pagamento entra e DESLIGA quando vence
@@ -11,6 +11,76 @@ const ga = require('../lib/ga');
 const meta = require('../lib/meta');
 // 11/09/2026: pedidos pagos na live (checkout Pix das subcontas Enterprise).
 const checkout = require('../lib/checkout');
+const { asaas } = require('../lib/asaas');
+
+/* ===========================================================================
+   15/09/2026 — ESCOPO DO TOKEN E VALOR RECONFERIDO NO ASAAS
+
+   O DEFEITO, em duas partes que se somavam:
+
+   1. O webhook de CADA subconta era registrado com o MESMO token
+      (ASAAS_WEBHOOK_TOKEN_PEDIDOS), e a subconta e aberta com o e-mail do
+      lojista — ele entra no Asaas e le esse token em Integracoes.
+   2. Este endpoint aceitava QUALQUER um dos tres tokens para QUALQUER evento.
+
+   Com o token na mao dava para postar, de qualquer lugar do mundo:
+     { event:'PAYMENT_RECEIVED', payment:{ id:'x', externalReference:'<uid>',
+       value: 99.90 } }
+   e o plano daquele uid — o dele ou o de terceiros — ligava por 34 dias, de
+   graca. Pior: acumularComissoes usava o `value` DO PAYLOAD, entao um evento
+   com value 20000 gerava R$ 3.000 de comissao sacavel por Pix.
+
+   O caminho de PEDIDO ja fazia o certo (confirmarNoAsaas, em lib/checkout.js,
+   pergunta ao Asaas antes de marcar pago). O caminho da MENSALIDADE nao fazia.
+
+   AGORA:
+     a) o token define o ESCOPO de quem chamou:
+          'mae'      -> ASAAS_WEBHOOK_TOKEN: tudo
+          'transfer' -> ASAAS_WEBHOOK_TOKEN_TRANSFER: so TRANSFER_*
+          'subconta' -> token proprio daquela subconta: so `pedido:` DELA
+          'legado'   -> ASAAS_WEBHOOK_TOKEN_PEDIDOS: so `pedido:`, e some
+                        assim que a env for apagada
+     b) no ramo de assinatura, o pagamento e RECONFERIDO no Asaas com a chave
+        MAE (GET /payments/{id}); valem `value`, `status` e `externalReference`
+        que o Asaas devolver — o payload vira apenas um aviso de "va conferir".
+
+   Recusa por escopo responde 200 e marca o evento como 'ok' de proposito: nao
+   e falha nossa a reprocessar, e 200 evita que a fila do Asaas pause.
+=========================================================================== */
+
+/* Comparacao em tempo constante. Tamanho diferente sai antes — o tamanho de um
+   token nao e segredo. */
+function mesmoToken(a, b) {
+  if (typeof b !== 'string' || !b.length || a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch (_) { return false; }
+}
+
+async function escopoDoToken(token) {
+  if (!token) return null;
+  if (mesmoToken(token, process.env.ASAAS_WEBHOOK_TOKEN)) return { escopo: 'mae', uid: '' };
+  if (mesmoToken(token, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER)) return { escopo: 'transfer', uid: '' };
+  /* Token proprio de subconta: uma leitura direta pelo hash, sem varrer. */
+  try {
+    const uid = await checkout.uidPorTokenWebhook(token);
+    if (uid) return { escopo: 'subconta', uid };
+  } catch (_) {}
+  /* Token compartilhado antigo. So sobrevive enquanto a env existir; apague-a
+     depois de rotacionar as subcontas (adm_wh_rotacionar). */
+  if (mesmoToken(token, process.env.ASAAS_WEBHOOK_TOKEN_PEDIDOS)) return { escopo: 'legado', uid: '' };
+  return null;
+}
+
+/* Le o pagamento no Asaas com a chave MAE. Devolve o objeto do Asaas, ou null
+   se nao der para confirmar. Falha FECHADA: sem confirmacao, nao liga plano. */
+async function conferirPagamentoNaMae(payId) {
+  const id = String(payId || '');
+  if (!/^[A-Za-z0-9_-]{4,60}$/.test(id)) return null;
+  try { return await asaas('/payments/' + id, 'GET'); }
+  catch (e) {
+    console.error('webhook: nao confirmou no Asaas', id, (e && e.message) || e);
+    return null;
+  }
+}
 
 // Pagamento entrou -> liga o plano
 const LIGA = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
@@ -212,6 +282,17 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
 
   // Nível 1 (recorrente)
   const p1 = await resolverParceiro(slug1);
+  /* AUTO-INDICACAO — 15/09/2026. A trava existia na cadeia de parceiros (a
+     regra do Firestore recusa create de parceiro com indicadoPor == slug
+     proprio) e NAO existia aqui. Sem ela, o parceiro aprovado abria a propria
+     conta de lojista com ?ref=<slug dele> e recebia 15-18% da propria
+     mensalidade, todo mes, para sempre — e o upline dele ainda levava N2 e N3
+     no primeiro pagamento. Barra o pagamento inteiro, nao so o nivel 1: os
+     niveis de cima so existem por causa de uma indicacao que nao vale. */
+  if (p1 && p1.uid === lojistaUid) {
+    console.warn('comissao: auto-indicacao barrada', lojistaUid, slug1);
+    return;
+  }
   if (p1 && p1.data.status === 'aprovado' && await parceiroPodeGanhar(p1.uid)) {
     // Nível do parceiro NESTE pagamento (conta o cliente que está pagando agora).
     // O percentual aplicado é o do nível no momento em que a mensalidade entra;
@@ -229,13 +310,13 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   if (primeiro) {
     const slug2 = p1 ? (p1.data.indicadoPor || '') : '';
     const p2 = slug2 ? await resolverParceiro(slug2) : null;
-    if (p2 && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
+    if (p2 && p2.uid !== lojistaUid && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
       await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia });
       creditados.add(p2.uid);
     }
     const slug3 = p2 ? (p2.data.indicadoPor || '') : '';
     const p3 = slug3 ? await resolverParceiro(slug3) : null;
-    if (p3 && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
+    if (p3 && p3.uid !== lojistaUid && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
       await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia });
       creditados.add(p3.uid);
     }
@@ -491,11 +572,18 @@ async function avisarDono(texto) {
 /* Miolo do webhook, isolado do req/res de proposito: o reprocessador chama
    esta mesma funcao. Erro aqui SOBE — quem decide o que fazer com ele e quem
    chamou. */
-async function processarEvento(evento) {
+async function processarEvento(evento, ctx) {
   const tipo = evento.event;
+  /* Sem ctx = chamada do reprocessador (api/webhook-reprocessa.js), que so
+     mexe em evento ja autenticado e ja gravado. Evento recusado por escopo
+     nunca chega la: ele e marcado 'ok', nao 'erro'. */
+  const escopo = (ctx && ctx.escopo) || 'mae';
+  const uidToken = (ctx && ctx.uid) || '';
+  const soPedido = (escopo === 'subconta' || escopo === 'legado');
 
   // Evento de TRANSFERENCIA (Pix de comissao saindo daqui).
   if (evento.transfer || String(tipo || '').indexOf('TRANSFER_') === 0) {
+    if (soPedido) return { ok: true, recusado: 'escopo', escopo, tratado: 'transferencia' };
     const r = await tratarTransferencia(tipo, evento.transfer || {});
     return Object.assign({ ok: true, tratado: 'transferencia' }, r);
   }
@@ -507,9 +595,29 @@ async function processarEvento(evento) {
   // AQUI, antes de tudo: sem este desvio, o codigo de baixo leria o "pedido:..."
   // como uid e gravaria uma assinatura falsa em assinaturas/{pedido:...}.
   if (typeof uid === 'string' && uid.startsWith('pedido:')) {
+    /* Token de subconta so fala do pedido DAQUELA subconta. Confere o dono
+       antes de deixar passar — senao um lojista com o proprio token mexeria no
+       pedido de outro. O valor em si continua sendo reconferido no Asaas la
+       dentro (confirmarNoAsaas). */
+    if (escopo === 'subconta') {
+      const pid = uid.slice(7);
+      let dono = '';
+      try {
+        const s = await db.collection('pedidos').doc(String(pid).slice(0, 60)).get();
+        dono = s.exists ? String((s.data() || {}).lojistaUid || '') : '';
+      } catch (_) {}
+      if (!dono || dono !== uidToken) {
+        console.warn('webhook: pedido de outro lojista recusado', pid, uidToken);
+        return { ok: true, recusado: 'dono', tratado: 'pedido' };
+      }
+    }
     const r = await checkout.webhookPedido(tipo, pay);
     return Object.assign({ ok: true, tratado: 'pedido' }, r);
   }
+
+  /* Daqui para baixo e dinheiro do Moviki: assinatura, ponto extra e comissao.
+     So o token da conta MAE fala aqui. */
+  if (soPedido) return { ok: true, recusado: 'escopo', escopo };
 
   // Ponto extra do Enterprise: externalReference = "ponto:<pid>".
   // Liga/desliga so o ponto (pontos/{pid}.ativo) — NAO mexe em plano nem comissao.
@@ -531,6 +639,25 @@ async function processarEvento(evento) {
     return { ok: true, ignorado: true };
   }
 
+  /* RECONFERENCIA — 15/09/2026. Nada abaixo daqui usa numero vindo do corpo da
+     requisicao. O Asaas e a fonte: valor, status e a que uid o pagamento
+     pertence. Sem confirmacao, nao liga nada (falha fechada). */
+  let payReal = pay;
+  if (LIGA.includes(tipo)) {
+    const conf = await conferirPagamentoNaMae(pay.id);
+    if (!conf) return { ok: false, naoConfirmado: true, uid, tipo };
+    const st = String(conf.status || '').toUpperCase();
+    if (st !== 'RECEIVED' && st !== 'CONFIRMED') {
+      console.warn('webhook: evento de LIGA sem pagamento no Asaas', pay.id, st);
+      return { ok: true, recusado: 'status_asaas', status: st, uid };
+    }
+    if (String(conf.externalReference || '') !== String(uid)) {
+      console.warn('webhook: externalReference divergente', pay.id, conf.externalReference, uid);
+      return { ok: true, recusado: 'referencia', uid };
+    }
+    payReal = conf;
+  }
+
   const ref = db.collection('assinaturas').doc(uid);
   const snap = await ref.get();
   const periodo = (snap.exists && snap.data().periodo) || 'mensal';
@@ -548,11 +675,11 @@ async function processarEvento(evento) {
 
     // Comissao do Programa de Parceiros. Roda depois da ativacao e NUNCA a
     // derruba: se der erro no calculo, o plano do lojista ja ficou ativo.
-    try { await acumularComissoes(uid, periodo, pay); }
+    try { await acumularComissoes(uid, periodo, payReal); }
     catch (ce) { console.error('comissao erro:', ce); }
 
     // GA4 + Meta: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
-    try { await registrarPurchase(uid, plano, periodo, pay); }
+    try { await registrarPurchase(uid, plano, periodo, payReal); }
     catch (ge) { console.error('purchase medicao erro:', ge); }
   } else {
     await ref.set({
@@ -575,21 +702,12 @@ async function processarEvento(evento) {
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).end();
 
-  // 1) Confirma que a chamada veio MESMO do Asaas: o token que a gente configura
-  //    no painel do Asaas vem no header abaixo. Sem ele bater, ignora.
-  // Comparacao em tempo constante pra nao vazar o token por medicao de tempo.
-  // Aceita TRES tokens: o de sempre (cobrancas), o de transferencias e o de
-  // pedidos. Assim da pra cadastrar um webhook novo no Asaas com token proprio
-  // sem precisar descobrir nem trocar o token antigo.
+  // 1) Confirma que a chamada veio MESMO do Asaas E descobre COM QUE PODERES.
+  //    O token nao e mais so um cracha de entrada: ele diz o que pode ser
+  //    feito. Ver o bloco de comentario no topo do arquivo.
   const token = String(req.headers['asaas-access-token'] || '');
-  const aceitos = [process.env.ASAAS_WEBHOOK_TOKEN, process.env.ASAAS_WEBHOOK_TOKEN_TRANSFER, process.env.ASAAS_WEBHOOK_TOKEN_PEDIDOS]
-    .filter(function (x) { return typeof x === 'string' && x.length > 0; });
-  const tBuf = Buffer.from(token);
-  const tokenOk = aceitos.some(function (esperado) {
-    const eBuf = Buffer.from(esperado);
-    return tBuf.length === eBuf.length && crypto.timingSafeEqual(tBuf, eBuf);
-  });
-  if (!tokenOk) return res.status(401).end();
+  const ctx = await escopoDoToken(token);
+  if (!ctx) return res.status(401).end();
 
   const evento = req.body || {};
   const eid = idDoEvento(evento);
@@ -603,6 +721,8 @@ module.exports = async (req, res) => {
     await evRef.create({
       evento: String(evento.event || ''),
       payload: evento,
+      escopo: ctx.escopo,
+      escopoUid: ctx.uid || '',
       status: 'processando',
       tentativas: 1,
       recebidoEm: FV.serverTimestamp(),
@@ -628,7 +748,7 @@ module.exports = async (req, res) => {
   // 3) Processa. Qualquer erro fica registrado e vira aviso — mas a resposta
   //    para o Asaas continua sendo 200, para a fila nunca pausar.
   try {
-    const r = await processarEvento(evento);
+    const r = await processarEvento(evento, ctx);
     try { await evRef.update({ status: 'ok', resultado: r || null, concluidoEm: FV.serverTimestamp(), atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
     return res.status(200).json(Object.assign({ ok: true, id: eid }, r || {}));
   } catch (e) {
