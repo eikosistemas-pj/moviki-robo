@@ -1,4 +1,4 @@
-// api/pontos.js  (repo: moviki-robo) | versao 2026-09-11-checkout1
+// api/pontos.js  (repo: moviki-robo) | versao 2026-09-15-livesessao
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
 // O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
 // cobrança. O 3º adicional (4º no total) cria uma assinatura recorrente de
@@ -19,6 +19,10 @@ const { asaas, PONTO_EXTRA, PONTOS_INCLUSOS } = require('../lib/asaas');
 // 11/09/2026: checkout Pix da live (Enterprise) entra como ETAPA daqui — o
 // projeto esta no teto de 12 funcoes. Acoes 'loja_*' e 'compra_*'.
 const checkout = require('../lib/checkout');
+// 15/09/2026: quem diz que a live esta no ar passou a ser o SERVIDOR. Mesma
+// razao do checkout para entrar como etapa daqui: o teto de 12 funcoes.
+// Acoes 'live_*'. Ver o cabecalho de lib/livesessao.js.
+const livesessao = require('../lib/livesessao');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const GKEY = process.env.GOOGLE_MAPS_KEY; // autocomplete de endereço (Google Places)
@@ -89,6 +93,7 @@ module.exports = async (req, res) => {
     const idToken = String(body.idToken || '');
     const acao = String(body.acao || '');
     if (checkout.ehAcao(acao)) { await checkout.tratar(req, res, body); return; }
+    if (livesessao.ehAcao(acao)) { await livesessao.tratar(req, res, body); return; }
     if (!idToken) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }
 
     let decoded;
