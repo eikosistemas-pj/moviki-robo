@@ -75,8 +75,14 @@ No painel do Asaas **Sandbox** → **Integrações → Webhooks → Adicionar**:
 
 ## Planos e preços (já embutidos em `lib/asaas.js`)
 
-- **Pró:** 37,90/mês · 99,90/trimestre · 379,00/ano
-- **Premium:** 49,90/mês · 134,90/trimestre · 499,00/ano
-- **Básico:** grátis (não passa pelo robô — é só não ter assinatura Pró/Premium).
+- **Pró:** 39,90/mês · 399,00/ano
+- **Premium:** 69,90/mês · 699,00/ano
+- **Enterprise:** 129,90/mês (**só mensal**) · ponto extra 19,90/mês, assinatura separada
+- **Básico:** grátis (não passa pelo robô — é só não ter assinatura paga).
+
+> **O trimestral foi aposentado em 16/09/2026.** Não existe mais em nenhuma
+> tela nem na tabela `PLANOS`. Link antigo com `?periodo=trimestral` cai no
+> mensal pelo painel; se chegar até aqui, o `criar-assinatura.js` recusa com
+> 400 — nunca cobrar um valor que a tela não mostrou.
 
 Pra mudar um preço, é só editar a tabela `PLANOS` no arquivo `lib/asaas.js`.
