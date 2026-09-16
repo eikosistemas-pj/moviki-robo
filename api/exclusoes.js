@@ -1,16 +1,58 @@
-// api/exclusoes.js  (repo: moviki-robo)
-// Painel do dono → Exclusões. Dois modos (campo "action"):
-//   - "listar":  devolve os pedidos de exclusão pendentes (status 'solicitado').
+// api/exclusoes.js | versao 2026-09-16-exclusao2  (repo: moviki-robo)
+// Painel do dono -> Exclusoes. Dois modos (campo "action"):
+//   - "listar":  devolve os pedidos de exclusao pendentes (status 'solicitado').
 //   - "excluir": APAGA DE VERDADE a conta do uid informado — cancela a assinatura
 //                no Asaas, apaga os dados no Firestore e no Storage, e remove a
 //                conta de acesso. NAO exige pedido aberto: o dono pode excluir
 //                qualquer conta (cadastro de teste, duplicata, abandono).
 //
-// Segurança: só um ADMIN (documento em /admins/{uid}) consegue — a permissão é
-// conferida AQUI no servidor (Admin SDK). O app do lojista NÃO tem acesso a isto.
+// Seguranca: so um ADMIN (documento em /admins/{uid}) consegue — a permissao e
+// conferida AQUI no servidor (Admin SDK). O app do lojista NAO tem acesso a isto.
 //
-// Envs (já existentes no projeto moviki-robo):
-//   FIREBASE_SERVICE_ACCOUNT (Admin SDK) · ASAAS_API_KEY / ASAAS_BASE_URL (cancelar assinatura)
+// Envs: FIREBASE_SERVICE_ACCOUNT (Admin SDK) · ASAAS_API_KEY / ASAAS_BASE_URL.
+//
+// ===================================================================
+// O QUE MUDOU EM 16/09/2026 (exclusao2) — tres buracos de dinheiro e um de LGPD
+// ===================================================================
+//
+// 1) ASSINATURA VIVA E SEM RASTRO (falha aberta).
+//    A versao anterior tentava cancelar no Asaas e, se falhasse, apenas anotava
+//    `assinaturaErro` no resumo e SEGUIA APAGANDO — inclusive `faturamento/{uid}`,
+//    o unico lugar onde mora o `asaasSubscriptionId`. Resultado: assinatura
+//    cobrando todo mes, conta apagada, e nenhum jeito de descobrir qual
+//    assinatura era. Agora a etapa 1 e FALHA FECHADA: sem confirmacao de que a
+//    assinatura morreu, NADA e apagado e o endpoint devolve 409 com o id.
+//    Falha de rede no DELETE nao e prova de que nao cancelou — por isso, quando
+//    o DELETE falha, o robo CONFERE com um GET antes de barrar. 404 (nao existe)
+//    e `deleted:true` contam como cancelada.
+//
+// 2) COMISSAO ORFA POR `lojistaUid` — dinheiro sacavel por Pix.
+//    A limpeza so removia comissoes por `parceiroUid` (as QUE O EXCLUIDO
+//    RECEBERIA). As comissoes que ELE GEROU, na carteira do parceiro que o
+//    indicou, ficavam intactas e sacaveis. Excluir um lojista de teste pagava
+//    comissao de verdade sobre uma assinatura que nunca existiu.
+//    Agora as comissoes com `lojistaUid == uid` sao tratadas ANTES de qualquer
+//    delete: as nao pagas viram `estornada:true` (o `pagar-saque.js` e o
+//    `parceiro.html` ja ignoram estornada) e as JA PAGAS sao apenas marcadas com
+//    `lojistaExcluido:true` — apagar historico de dinheiro que saiu quebraria a
+//    conferencia com o Asaas. Estorno, nao delete: fica rastro.
+//
+// 3) O MODO LIVE E O CHECKOUT NASCERAM DEPOIS DESTE ARQUIVO.
+//    Sobreviviam a exclusao: `live_sessoes`, `live_cota`, `live_throttle`,
+//    `live_bloqueios`, `checkout_publico`, `checkout_contas` (dados da conta
+//    de recebimento do lojista), `recebimento`, `vik_memoria`, e os `pedidos`,
+//    `lives`, `denuncias` e `moderacao` daquele lojista. `checkout_contas`
+//    sozinho ja e incidente de LGPD.
+//
+// 4) SUBCOLECAO ORFA. Apagar `negocios/{uid}` NAO apaga as subcolecoes. A versao
+//    anterior listava `avaliacoes` e `resumo` na mao — `estado` (com
+//    `estado/live`), `livechat` e `livepresenca` ficavam no banco para sempre.
+//    Agora o robo usa `listCollections()`: apaga o que existe hoje e o que for
+//    criado amanha, sem precisar voltar aqui.
+//
+// 5) AUTH QUE NAO APAGA. Se `deleteUser` falhar, a conta de acesso continua de
+//    pe e o dono consegue logar num app sem dados. Agora ha plano B: desativar
+//    a conta (`disabled:true`), que impede o login mesmo com a sessao antiga.
 
 const { admin, db } = require('../lib/firebase');
 const { asaas } = require('../lib/asaas');
@@ -18,9 +60,26 @@ const { asaas } = require('../lib/asaas');
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const BUCKET = process.env.FIREBASE_STORAGE_BUCKET || 'moviki-app.firebasestorage.app';
 
-// Apaga os arquivos do usuario no Storage. Sem isto a foto e o documento dele
-// continuavam no balde depois da conta apagada — o que contraria a promessa do
-// painel ("os dados somem definitivamente") e a propria LGPD.
+// Documentos de topo cuja CHAVE e o uid do lojista.
+// `trial_negado` fica de fora de proposito: e registro anti-abuso: apagar
+// devolveria o teste gratis para quem ja usou.
+const DOCS_POR_UID = [
+  'assinaturas', 'indicacoes', 'avisos_cliente', 'recebimento',
+  'live_sessoes', 'live_cota', 'live_throttle', 'live_bloqueios',
+  'checkout_publico', 'checkout_contas', 'vik_memoria',
+];
+
+// Colecoes de topo que guardam o uid do lojista num CAMPO.
+const COLECOES_POR_CAMPO = [
+  { colecao: 'pedidos',   campo: 'lojistaUid' },
+  { colecao: 'lives',     campo: 'lojistaUid' },
+  { colecao: 'denuncias', campo: 'lojistaUid' },
+  { colecao: 'moderacao', campo: 'lojistaUid' },
+];
+
+const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
+
+// Apaga os arquivos do usuario no Storage.
 async function apagarArquivos(uid, resumo) {
   const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/'];
   for (const prefix of alvos) {
@@ -33,22 +92,83 @@ async function apagarArquivos(uid, resumo) {
   }
 }
 
-// Apaga todos os docs de uma consulta, em lotes (Firestore aceita até 500/lote).
+// Apaga todos os docs de uma consulta, em lotes.
 async function apagarDaConsulta(query) {
   const snap = await query.get();
   const docs = snap.docs;
   let n = 0;
-  for (let i = 0; i < docs.length; i += 400) {
+  for (let i = 0; i < docs.length; i += LOTE) {
     const batch = db.batch();
-    docs.slice(i, i + 400).forEach((d) => { batch.delete(d.ref); n++; });
+    docs.slice(i, i + LOTE).forEach((d) => { batch.delete(d.ref); n++; });
     await batch.commit();
   }
   return n;
 }
 
-// Apaga uma subcoleção inteira (ex.: negocios/{uid}/avaliacoes).
-async function apagarSubcolecao(parentRef, sub) {
-  return apagarDaConsulta(parentRef.collection(sub));
+/* Apaga TODAS as subcolecoes de um documento, incluindo as que ainda nao
+   existiam quando este arquivo foi escrito. `listCollections()` so existe no
+   Admin SDK — e a razao de esta limpeza morar no robo e nao no app. */
+async function apagarTodasSubcolecoes(parentRef) {
+  let n = 0;
+  let subs = [];
+  try { subs = await parentRef.listCollections(); } catch (_) { return 0; }
+  for (const sub of subs) {
+    try { n += await apagarDaConsulta(sub); } catch (_) {}
+  }
+  return n;
+}
+
+/* ETAPA 1 — cancelar a assinatura, com CONFIRMACAO.
+   Devolve { ok:true } so quando a assinatura comprovadamente nao cobra mais.
+   Erro de rede no DELETE nao e prova de nada: por isso o GET de conferencia. */
+async function cancelarAssinatura(subId) {
+  try {
+    await asaas('/subscriptions/' + subId, 'DELETE');
+    return { ok: true, via: 'cancelada' };
+  } catch (e) {
+    if (Number(e && e.status) === 404) return { ok: true, via: 'inexistente' };
+    try {
+      const s = await asaas('/subscriptions/' + subId, 'GET');
+      const st = String((s && s.status) || '').toUpperCase();
+      if (s && (s.deleted === true || st === 'INACTIVE' || st === 'EXPIRED')) {
+        return { ok: true, via: 'ja_estava_cancelada' };
+      }
+      return { ok: false, erro: 'a assinatura continua ' + (st || 'ativa') + ' no Asaas' };
+    } catch (e2) {
+      if (Number(e2 && e2.status) === 404) return { ok: true, via: 'inexistente' };
+      return { ok: false, erro: (e && e.message) || 'falha ao cancelar' };
+    }
+  }
+}
+
+/* ETAPA 2 — comissoes GERADAS por este lojista, na carteira de terceiros.
+   Nao pagas -> estornadas (somem do sacavel, sobra o rastro).
+   Ja pagas   -> so marcadas: dinheiro que saiu nao se reescreve. */
+async function tratarComissoesDoLojista(uid, resumo) {
+  const snap = await db.collection('comissoes').where('lojistaUid', '==', uid).get();
+  const docs = snap.docs;
+  for (let i = 0; i < docs.length; i += LOTE) {
+    const fatia = docs.slice(i, i + LOTE);
+    const batch = db.batch();
+    let escritas = 0;
+    fatia.forEach((d) => {
+      const c = d.data() || {};
+      if (c.pago === true) {
+        batch.update(d.ref, { lojistaExcluido: true });
+        escritas++; resumo.comissoesGeradasMarcadas++;
+        return;
+      }
+      if (c.estornada === true) { resumo.comissoesGeradasJaEstornadas++; return; }
+      batch.update(d.ref, {
+        estornada: true,
+        estornoMotivo: 'lojista_excluido',
+        estornadaEm: admin.firestore.FieldValue.serverTimestamp(),
+        lojistaExcluido: true,
+      });
+      escritas++; resumo.comissoesGeradasEstornadas++;
+    });
+    if (escritas) await batch.commit();
+  }
 }
 
 module.exports = async (req, res) => {
@@ -98,24 +218,60 @@ module.exports = async (req, res) => {
       } catch (_) {}
 
       const resumo = {
-        assinaturaCancelada: false, avaliacoes: 0, comissoes: 0, saques: 0,
-        parceiro: false, authRemovido: false, apelidoLiberado: '', pontos: 0,
-        metricas: 0, mensagens: 0, arquivos: false,
+        assinaturaCancelada: false, assinaturaVia: '',
+        comissoesGeradasEstornadas: 0, comissoesGeradasMarcadas: 0,
+        comissoesGeradasJaEstornadas: 0,
+        subcolecoes: 0, avaliacoes: 0, comissoes: 0, saques: 0,
+        parceiro: false, espelhoParceiro: false, authRemovido: false, authDesativado: false,
+        apelidoLiberado: '', pontos: 0, metricas: 0, mensagens: 0,
+        docsPorUid: 0, pedidos: 0, lives: 0, denuncias: 0, moderacao: 0,
+        arquivos: false,
       };
 
-      // 1) Cancela a assinatura no Asaas (se houver) — antes de apagar o faturamento.
+      /* ==========================================================
+         1) ASSINATURA — FALHA FECHADA. Nada e apagado antes disto.
+         ========================================================== */
+      let subId = null;
       try {
         const fat = await db.collection('faturamento').doc(uid).get();
-        const subId = fat.exists ? (fat.data() || {}).asaasSubscriptionId : null;
-        if (subId) {
-          try { await asaas('/subscriptions/' + subId, 'DELETE'); resumo.assinaturaCancelada = true; }
-          catch (e) { resumo.assinaturaErro = e.message || 'falha ao cancelar'; }
+        subId = fat.exists ? ((fat.data() || {}).asaasSubscriptionId || null) : null;
+      } catch (e) {
+        res.status(502).json({ ok: false, erro: 'faturamento_ilegivel',
+          mensagem: 'Nao consegui ler o faturamento desta conta para conferir a assinatura. ' +
+                    'NADA foi apagado. Tente de novo em instantes.' });
+        return;
+      }
+      if (subId) {
+        const r = await cancelarAssinatura(String(subId));
+        if (!r.ok) {
+          res.status(409).json({ ok: false, erro: 'assinatura_viva',
+            asaasSubscriptionId: String(subId),
+            mensagem: 'A assinatura ' + subId + ' NAO foi cancelada no Asaas (' + r.erro + '). ' +
+                      'Nenhum dado foi apagado — se eu apagasse agora, a cobranca continuaria e o ' +
+                      'id da assinatura sumiria junto com a conta. Cancele no painel do Asaas e ' +
+                      'clique em excluir de novo.' });
+          return;
         }
-      } catch (_) {}
+        resumo.assinaturaCancelada = true;
+        resumo.assinaturaVia = r.via;
+      }
 
-      // 2) Apaga os dados do negócio. O documento e LIDO ANTES de sumir: e dele
-      //    que sai o apelido, e sem liberar o apelido ele fica reservado pra
-      //    sempre e ninguem mais consegue usar aquele endereco.
+      /* ==========================================================
+         2) COMISSOES GERADAS POR ESTE LOJISTA (carteira de terceiros).
+            Vem ANTES de qualquer delete: se o resto falhar no meio, o
+            dinheiro ja esta fora do sacavel.
+         ========================================================== */
+      try { await tratarComissoesDoLojista(uid, resumo); }
+      catch (e) {
+        res.status(500).json({ ok: false, erro: 'comissoes_geradas',
+          mensagem: 'Nao consegui estornar as comissoes geradas por esta conta. ' +
+                    'NADA foi apagado — elas ficariam sacaveis por Pix. Tente de novo.' });
+        return;
+      }
+
+      /* ==========================================================
+         3) Negocio + TODAS as subcolecoes + apelido.
+         ========================================================== */
       const negRef = db.collection('negocios').doc(uid);
       let slugNeg = '';
       try {
@@ -123,8 +279,8 @@ module.exports = async (req, res) => {
         if (neg.exists) slugNeg = String((neg.data() || {}).slug || '');
       } catch (_) {}
 
-      try { resumo.avaliacoes = await apagarSubcolecao(negRef, 'avaliacoes'); } catch (_) {}
-      try { await apagarSubcolecao(negRef, 'resumo'); } catch (_) {}   // {n, soma} das avaliacoes
+      try { resumo.subcolecoes = await apagarTodasSubcolecoes(negRef); } catch (_) {}
+      resumo.avaliacoes = resumo.subcolecoes;   // compatibilidade com o painel antigo
       await negRef.delete().catch(() => {});
 
       if (slugNeg) {
@@ -143,58 +299,88 @@ module.exports = async (req, res) => {
         }
       } catch (_) {}
 
-      // Contador de desempenho (metricas/{uid}/dias) — colecao de topo.
+      // Contador de desempenho (metricas/{uid}/dias).
       try {
         const mref = db.collection('metricas').doc(uid);
-        resumo.metricas = await apagarSubcolecao(mref, 'dias');
+        resumo.metricas = await apagarTodasSubcolecoes(mref);
         await mref.delete().catch(() => {});
       } catch (_) {}
 
       // Caixa de mensagens: as mensagens sao subcolecao e nao somem com o pai.
       try {
         const cref = db.collection('conversas').doc(uid);
-        resumo.mensagens = await apagarSubcolecao(cref, 'mensagens');
+        resumo.mensagens = await apagarTodasSubcolecoes(cref);
         await cref.delete().catch(() => {});
       } catch (_) {}
-
-      await db.collection('assinaturas').doc(uid).delete().catch(() => {});
 
       // faturamento tem a subcolecao ga/{payId} (trava de dedup do purchase).
       try {
         const fref = db.collection('faturamento').doc(uid);
-        await apagarSubcolecao(fref, 'ga');
+        await apagarTodasSubcolecoes(fref);
         await fref.delete().catch(() => {});
       } catch (_) {}
 
-      await db.collection('indicacoes').doc(uid).delete().catch(() => {});
-      await db.collection('avisos_cliente').doc(uid).delete().catch(() => {});
+      /* ==========================================================
+         4) Documentos de topo com o uid na chave (Live, checkout, etc.).
+         ========================================================== */
+      for (const col of DOCS_POR_UID) {
+        try { await db.collection(col).doc(uid).delete(); resumo.docsPorUid++; } catch (_) {}
+      }
 
-      // 2b) Arquivos no Storage (logo do pino, fotos de produto, anexos).
+      /* ==========================================================
+         5) Colecoes de topo com o uid num CAMPO.
+         ========================================================== */
+      for (const alvo of COLECOES_POR_CAMPO) {
+        try {
+          resumo[alvo.colecao] = await apagarDaConsulta(
+            db.collection(alvo.colecao).where(alvo.campo, '==', uid)
+          );
+        } catch (_) {}
+      }
+
+      // 6) Arquivos no Storage (logo do pino, fotos de produto, anexos).
       await apagarArquivos(uid, resumo);
 
-      // 3) Se também for parceiro: libera o apelido e apaga parceiro + comissões/saques dele.
+      /* ==========================================================
+         7) Se tambem for parceiro: apelido, ESPELHO PUBLICO, comissoes e saques.
+            O espelho `parceiros_publicos/{slug}` e `read: true` — ficava no ar
+            com o nome de um parceiro que nao existe mais.
+         ========================================================== */
       try {
         const parcRef = db.collection('parceiros').doc(uid);
         const parc = await parcRef.get();
         if (parc.exists) {
           resumo.parceiro = true;
           const slug = (parc.data() || {}).slug;
-          if (slug) { await db.collection('parceiro_slugs').doc(String(slug)).delete().catch(() => {}); }
+          if (slug) {
+            await db.collection('parceiro_slugs').doc(String(slug)).delete().catch(() => {});
+            await db.collection('parceiros_publicos').doc(String(slug)).delete()
+              .then(() => { resumo.espelhoParceiro = true; })
+              .catch(() => {});
+          }
           resumo.comissoes = await apagarDaConsulta(db.collection('comissoes').where('parceiroUid', '==', uid));
           resumo.saques    = await apagarDaConsulta(db.collection('saques').where('parceiroUid', '==', uid));
           await parcRef.delete().catch(() => {});
         }
       } catch (e) { resumo.parceiroErro = e.message || 'falha'; }
 
-      // 4) Remove a conta de acesso (Auth).
+      /* ==========================================================
+         8) Conta de acesso. Se nao apagar, ao menos DESATIVA.
+         ========================================================== */
       try { await admin.auth().deleteUser(uid); resumo.authRemovido = true; }
-      catch (e) { resumo.authErro = (e && e.message) || 'falha'; }
+      catch (e) {
+        resumo.authErro = (e && e.message) || 'falha';
+        try { await admin.auth().updateUser(uid, { disabled: true }); resumo.authDesativado = true; }
+        catch (_) {}
+      }
 
-      // 5) Fecha o pedido guardando um registro mínimo (sem dados pessoais).
+      // 9) Fecha o pedido guardando um registro minimo (sem dados pessoais).
       await db.collection('exclusoes').doc(uid).set({
         status: 'excluido',
         excluidoEm: admin.firestore.FieldValue.serverTimestamp(),
         excluidoPor: decoded.uid,
+        assinaturaCancelada: resumo.assinaturaCancelada,
+        comissoesEstornadas: resumo.comissoesGeradasEstornadas,
         nome:  admin.firestore.FieldValue.delete(),
         email: admin.firestore.FieldValue.delete(),
       }, { merge: true });
