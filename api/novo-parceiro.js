@@ -1,3 +1,4 @@
+// api/novo-parceiro.js | versao 2026-09-16-leadparceiro  (repo: moviki-robo)
 // api/novo-parceiro.js  (repo: moviki-robo)
 //
 // Tem TRÊS papéis nesse arquivo (consolidados aqui de propósito — o plano
@@ -46,6 +47,7 @@ const { admin, db } = require('../lib/firebase');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { buscarPerfil } = require('../lib/instagram');
 const { gravarEspelho, espelharPorUid } = require('../lib/espelhoParceiro');
+const meta = require('../lib/meta');
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
@@ -454,7 +456,36 @@ module.exports = async (req, res) => {
         'Status: pendente ⏳\n\n' +
         'Aprovar agora:\n' + PAINEL_URL;
 
-    const telegramOk = await enviarTelegram(texto);
+    /* ==========================================================
+       LEAD DA CAPI — 16/09/2026
+       O cadastro de PARCEIRO nunca disparou evento nenhum para a Meta. A
+       campanha de parceiros vinha otimizando sem sinal de conversao: a Meta
+       so via clique e tempo de pagina, e escolhia publico por isso.
+       `eventoId` proprio ('leadp_') porque parceiro e comerciante podem ser o
+       mesmo uid — com o id padrao a Meta deduplicaria e o segundo sumiria.
+       Nada aqui derruba o cadastro: falhou, segue.
+       ========================================================== */
+    let medicao = '';
+    try {
+      await meta.lead({
+        uid,
+        email: p.email || decoded.email || '',
+        telefone: p.whatsapp || '',
+        origem: 'cadastro_parceiro',
+        eventoId: 'leadp_' + uid,
+        agenteUsuario: String(req.headers['user-agent'] || ''),
+        ip: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || String(req.headers['x-real-ip'] || ''),
+        fbc: String(body.fbc || ''),
+        fbp: String(body.fbp || ''),
+        origemUrl: String(body.origemUrl || 'https://app.moviki.com.br/seja-parceiro.html'),
+      });
+      medicao = meta.ultimoTexto ? meta.ultimoTexto() : '';
+    } catch (e) {
+      medicao = 'Medicao: FALHOU — ' + ((e && e.message) ? String(e.message).slice(0, 120) : 'erro');
+    }
+
+    const telegramOk = await enviarTelegram(texto + (medicao ? '\n\n' + medicao : ''));
 
     res.status(200).json({ ok: true, status: 'pendente', telegram: telegramOk });
   } catch (e) {
