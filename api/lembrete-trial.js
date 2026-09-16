@@ -158,7 +158,7 @@ function montarEmail(tipo, nome, dias) {
 
   const ctaTexto = pago ? 'Acessar meu painel →' : 'Assinar agora →';
   const linhaPreco = pago ? '' :
-    `<p style="margin:0 0 22px;font-size:13px;color:#64748b;text-align:center">Premium por R$ 49,90/mês (com sua logo no mapa) · ou Pró por R$ 37,90/mês.</p>`;
+    `<p style="margin:0 0 22px;font-size:13px;color:#64748b;text-align:center">Premium por R$ 69,90/mês (com sua logo no mapa) · ou Pró por R$ 39,90/mês.</p>`;
 
   const html = `<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -215,7 +215,7 @@ function montarEmail(tipo, nome, dias) {
     (pago ? '- Sem interrupção pros seus clientes' : '- No Premium, sua logo aparece no seu pino do mapa (mais destaque)'),
     '',
     (pago ? 'Acessar meu painel: ' : 'Assine agora: ') + PAINEL_URL,
-    (pago ? '' : 'Premium R$ 49,90/mês (com logo no mapa) ou Pró R$ 37,90/mês.'),
+    (pago ? '' : 'Premium R$ 69,90/mês (com logo no mapa) ou Pró R$ 39,90/mês.'),
     '',
     'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')',
     '', 'Equipe Moviki', 'O mapa inteligente dos negócios em movimento.',
