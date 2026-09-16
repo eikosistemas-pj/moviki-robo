@@ -1,4 +1,4 @@
-// api/pagar-saque.js  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-09-16-saque1  (repo: moviki-robo)
 // Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
 // a permissão é conferida AQUI no servidor, não dá para burlar pelo app.
 //
@@ -92,10 +92,20 @@ function ms(x) {
   return null;
 }
 
+/* B11 (16/09/2026) — CORTE INVALIDO NAO LIBERA NADA.
+   `pedidoEm` era escrito pelo navegador do parceiro e a regra do Firestore so
+   exigia que o campo existisse. Bastava mandar uma STRING no lugar da data:
+   ms() devolvia null, `limiteMs` ficava null, as duas comparacoes abaixo eram
+   puladas e TODAS as comissoes em retencao de 7 dias entravam no pagamento.
+   A regra v25 passou a exigir request.time, mas a regra protege os saques
+   NOVOS — os documentos ja gravados com corte torto continuam no banco. Aqui
+   a falha e FECHADA: sem corte legivel, nenhuma comissao e selecionada e
+   `corteOk` volta false, e quem chamou recusa o pagamento. */
 function selecionarComissoes(docs, corte) {
   const limiteMs = ms(corte);
   const escolhidas = [];
   let valor = 0;
+  if (!limiteMs) return { escolhidas: [], valor: 0, corteOk: false };
   docs.forEach((d) => {
     const c = typeof d.data === 'function' ? d.data() : d;
     if (c.pago || c.estornada) return;
@@ -106,7 +116,38 @@ function selecionarComissoes(docs, corte) {
     escolhidas.push(d);
     valor += Number(c.valor) || 0;
   });
-  return { escolhidas: escolhidas, valor: Math.round(valor * 100) / 100 };
+  return { escolhidas: escolhidas, valor: Math.round(valor * 100) / 100, corteOk: true };
+}
+
+/* B13 (16/09/2026) — O PIX SAI ANTES DA BAIXA, E A BAIXA PODIA FALHAR.
+   A quitacao era um `db.batch()` unico. O Firestore recusa batch acima de 500
+   operacoes: parceiro com muitas comissoes fazia o Pix sair e o commit
+   estourar — e o clique seguinte pagava tudo de novo, porque nada tinha sido
+   marcado como pago.
+   Duas mudancas:
+   1) a quitacao vai em LOTES de 400, nunca num batch so;
+   2) quem fecha primeiro e o SAQUE (uma escrita so, que praticamente nao
+      falha), com `quitacaoPendente`. Se um lote de comissoes falhar depois, o
+      dinheiro ja esta registrado como pago e o proximo clique RETOMA a
+      quitacao em vez de mandar outro Pix.
+   A ordem importa: dinheiro que saiu se registra antes de qualquer trabalho
+   que possa estourar. */
+const LOTE_QUITACAO = 400;
+
+async function quitarComissoes(docs, saqueId) {
+  let feitas = 0;
+  for (let i = 0; i < docs.length; i += LOTE_QUITACAO) {
+    const fatia = docs.slice(i, i + LOTE_QUITACAO);
+    const b = db.batch();
+    fatia.forEach((d) => b.update(d.ref, {
+      pago: true,
+      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
+      saqueId: saqueId,
+    }));
+    await b.commit();
+    feitas += fatia.length;
+  }
+  return feitas;
 }
 
 async function consultarTitular(cand) {
@@ -203,7 +244,7 @@ module.exports = async (req, res) => {
 
     // 2) De quem estamos falando e até que data vale o corte.
     const avulso = !saqueId;                 // pagamento direto pela linha do parceiro
-    let saqueRef = null, parceiroUid = null, corte = null;
+    let saqueRef = null, parceiroUid = null, corte = null, retomarQuitacao = false;
 
     if (!avulso) {
       saqueRef = db.collection('saques').doc(saqueId);
@@ -211,8 +252,14 @@ module.exports = async (req, res) => {
       if (!snap.exists) { res.status(404).json({ ok: false, erro: 'saque nao encontrado' }); return; }
       const saque = snap.data();
       if (saque.status === 'pago') {
-        res.status(200).json({ ok: true, jaPago: true, valorPago: saque.valorPago || 0 });
-        return;
+        /* B13 — Pix ja saiu, mas a baixa das comissoes nao terminou. O proximo
+           clique RETOMA a quitacao; nao manda dinheiro nenhum. */
+        if (saque.quitacaoPendente === true && (etapa === 'pagar' || etapa === 'manual')) {
+          retomarQuitacao = true;
+        } else {
+          res.status(200).json({ ok: true, jaPago: true, valorPago: saque.valorPago || 0 });
+          return;
+        }
       }
       parceiroUid = saque.parceiroUid;
       corte = saque.pedidoEm;
@@ -235,6 +282,38 @@ module.exports = async (req, res) => {
     const sel = selecionarComissoes(cs.docs, corte);
     const valor = sel.valor;
 
+    /* B11 — corte ilegivel: nao paga, nao quita, nao registra. Saque antigo
+       gravado com `pedidoEm` torto cai aqui em vez de liberar a retencao. */
+    if (!sel.corteOk) {
+      res.status(409).json({ ok: false, erro: 'corte_invalido',
+        mensagem: 'Este pedido de saque esta com a data de pedido invalida e nao pode ser pago. ' +
+                  'Peca ao parceiro para refazer o pedido, ou pague pelo banco e registre na mao.' });
+      return;
+    }
+
+    /* B13 — RETOMADA. O Pix ja saiu e o saque ja esta 'pago'; o que faltou foi
+       marcar as comissoes. Nenhuma transferencia nova acontece aqui. */
+    if (retomarQuitacao) {
+      let quitadas = 0;
+      try {
+        quitadas = await quitarComissoes(sel.escolhidas, saqueRef.id);
+        await saqueRef.update({
+          quitacaoPendente: false,
+          comissoesQuitadas: admin.firestore.FieldValue.increment(quitadas),
+          quitacaoRetomadaEm: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (err) {
+        res.status(500).json({ ok: false, erro: 'quitacao',
+          mensagem: 'O Pix ja havia saido. Consegui dar baixa em ' + quitadas + ' comissao(oes) ' +
+                    'e o restante ficou pendente. Clique de novo para continuar — ' +
+                    'nenhum valor novo sai.' });
+        return;
+      }
+      res.status(200).json({ ok: true, retomada: true, qtd: quitadas,
+        mensagem: 'Baixa concluida. Nenhum valor novo saiu.' });
+      return;
+    }
+
     // ---------- etapa MANUAL: o dono pagou pelo banco, só registra ----------
     if (etapa === 'manual') {
       if (avulso) {
@@ -244,12 +323,6 @@ module.exports = async (req, res) => {
         }
         saqueRef = db.collection('saques').doc();
       }
-      const batch = db.batch();
-      sel.escolhidas.forEach((d) => batch.update(d.ref, {
-        pago: true,
-        pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-        saqueId: saqueRef.id,
-      }));
       const dadosSaque = {
         status: 'pago',
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
@@ -259,18 +332,32 @@ module.exports = async (req, res) => {
         formaPagamento: 'manual',
         pagoPor: decoded.uid,
       };
+      /* B13 — o registro do saque fecha PRIMEIRO, em uma escrita so; as
+         comissoes vao depois, em lotes de 400. Batch unico estourava acima de
+         500 operacoes e deixava o saque sem registro nenhum. */
       if (avulso) {
-        batch.set(saqueRef, Object.assign({
+        await saqueRef.set(Object.assign({
           parceiroUid: parceiroUid,
           valorSolicitado: valor,
           pedidoEm: corte,
           origem: 'dono',
+          quitacaoPendente: sel.escolhidas.length > 0,
         }, dadosSaque));
       } else {
-        batch.update(saqueRef, dadosSaque);
+        await saqueRef.update(Object.assign({ quitacaoPendente: sel.escolhidas.length > 0 }, dadosSaque));
       }
-      await batch.commit();
-      res.status(200).json({ ok: true, valorPago: valor, qtd: sel.escolhidas.length, forma: 'manual' });
+      let qtdM = 0;
+      try {
+        qtdM = await quitarComissoes(sel.escolhidas, saqueRef.id);
+        await saqueRef.update({ quitacaoPendente: false });
+      } catch (err) {
+        res.status(500).json({ ok: false, erro: 'quitacao',
+          mensagem: 'O saque foi registrado como pago, mas a baixa parou em ' + qtdM +
+                    ' comissao(oes). Clique em pagar de novo: o robo retoma a baixa e ' +
+                    'nenhum valor novo sai.' });
+        return;
+      }
+      res.status(200).json({ ok: true, valorPago: valor, qtd: qtdM, forma: 'manual' });
       return;
     }
 
@@ -317,16 +404,50 @@ module.exports = async (req, res) => {
 
     // ---------- etapa PAGAR ----------
     if (avulso) {
-      // Abre o registro do saque já travado, para clique duplo não pagar 2x.
-      saqueRef = db.collection('saques').doc();
-      await saqueRef.set({
-        parceiroUid: parceiroUid,
-        valorSolicitado: valor,
-        status: 'solicitado',
-        pedidoEm: corte,
-        origem: 'dono',
-        pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      /* B12 (16/09/2026) — SAQUE AVULSO PAGO EM DOBRO.
+         Cada chamada abria `db.collection('saques').doc()`, um id novo a cada
+         clique. O `externalReference` mandado ao Asaas e o id do saque: ids
+         diferentes, entao a trava de duplicidade do Asaas nao pegava. Dois
+         cliques, dois Pix — e a consulta de "pedido aberto" feita ANTES nao
+         segura nada, porque os dois cliques a fazem antes de qualquer escrita.
+         Agora o id do saque avulso e DETERMINISTICO por parceiro e por dia, e
+         nasce dentro de uma transacao. O segundo clique encontra o documento
+         do primeiro: ou responde "ja pago", ou "em curso", ou — se a tentativa
+         anterior falhou de verdade e a trava expirou — reaproveita o MESMO id,
+         que e o que faz o Asaas recusar a segunda transferencia. */
+      const diaSaque = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10).replace(/-/g, '');
+      saqueRef = db.collection('saques').doc('av_' + parceiroUid + '_' + diaSaque);
+      try {
+        await db.runTransaction(async (tx) => {
+          const s0 = await tx.get(saqueRef);
+          if (s0.exists) {
+            const d0 = s0.data() || {};
+            if (d0.status === 'pago') { const e = new Error('ja_pago'); e.code = 'ja_pago'; throw e; }
+            const emCurso0 = ms(d0.pagamentoEmCursoEm);
+            if (emCurso0 && (Date.now() - emCurso0) < TRAVA_MS) {
+              const e = new Error('em_curso'); e.code = 'em_curso'; throw e;
+            }
+            tx.update(saqueRef, {
+              valorSolicitado: valor,
+              pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            return;
+          }
+          tx.set(saqueRef, {
+            parceiroUid: parceiroUid,
+            valorSolicitado: valor,
+            status: 'solicitado',
+            pedidoEm: corte,
+            origem: 'dono',
+            pagamentoEmCursoEm: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+      } catch (err) {
+        if (err.code === 'ja_pago') { res.status(200).json({ ok: true, jaPago: true }); return; }
+        res.status(409).json({ ok: false, erro: 'em_curso',
+          mensagem: 'Esse pagamento ja esta sendo processado. Aguarde alguns instantes e atualize.' });
+        return;
+      }
     } else {
       // Trava contra clique duplo: quem conseguir marcar primeiro é quem paga.
       try {
@@ -416,18 +537,16 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // Deu certo: quita comissões e fecha o saque.
-    const batch = db.batch();
-    sel.escolhidas.forEach((d) => batch.update(d.ref, {
-      pago: true,
-      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-      saqueId: saqueRef.id,
-    }));
-    batch.update(saqueRef, {
+    /* B13 — O DINHEIRO SAIU. Registrar isso vem ANTES de qualquer trabalho
+       que possa estourar. Uma escrita so, e `quitacaoPendente` guarda que a
+       baixa das comissoes ainda nao terminou. Se o passo seguinte falhar, o
+       proximo clique cai na retomada la em cima e NAO manda outro Pix. */
+    await saqueRef.update({
       status: 'pago',
       pagoEm: admin.firestore.FieldValue.serverTimestamp(),
       valorPago: valor,
-      comissoesQuitadas: sel.escolhidas.length,
+      comissoesQuitadas: 0,
+      quitacaoPendente: sel.escolhidas.length > 0,
       comprovante: comprovante || ('Pix Asaas ' + ((transf && transf.id) || '')),
       formaPagamento: 'pix_automatico',
       transferenciaId: (transf && transf.id) || null,
@@ -437,10 +556,24 @@ module.exports = async (req, res) => {
       pagamentoEmCursoEm: null,
       pagoPor: decoded.uid,
     });
-    await batch.commit();
+
+    let qtdQ = 0;
+    try {
+      qtdQ = await quitarComissoes(sel.escolhidas, saqueRef.id);
+      await saqueRef.update({ quitacaoPendente: false, comissoesQuitadas: qtdQ });
+    } catch (err) {
+      console.error('pagar-saque: quitacao parcial', saqueRef.id, qtdQ, err);
+      await saqueRef.update({ comissoesQuitadas: qtdQ }).catch(() => {});
+      res.status(500).json({ ok: false, erro: 'quitacao', pagou: true,
+        transferenciaId: (transf && transf.id) || null,
+        mensagem: 'O Pix de ' + valor + ' SAIU. A baixa parou em ' + qtdQ + ' de ' +
+                  sel.escolhidas.length + ' comissao(oes). Clique em pagar de novo: ' +
+                  'o robo retoma a baixa e nenhum valor novo sai.' });
+      return;
+    }
 
     res.status(200).json({
-      ok: true, forma: 'pix_automatico', valorPago: valor, qtd: sel.escolhidas.length,
+      ok: true, forma: 'pix_automatico', valorPago: valor, qtd: qtdQ,
       transferenciaId: (transf && transf.id) || null, transferenciaStatus: st,
       titular: dados.titular,
     });
@@ -453,4 +586,6 @@ module.exports = async (req, res) => {
 // exportado só para os testes de lógica
 module.exports.candidatosChavePix = candidatosChavePix;
 module.exports.selecionarComissoes = selecionarComissoes;
+module.exports.LOTE_QUITACAO = LOTE_QUITACAO;
+module.exports.quitarComissoes = quitarComissoes;
 module.exports.TETO_SAQUE_AUTOMATICO = TETO_SAQUE_AUTOMATICO;
