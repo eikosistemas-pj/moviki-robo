@@ -4,6 +4,9 @@ Este arquivo é lido pelo Claude Code no início de toda sessão. Ele vale para 
 
 > **REGRA DE SINCRONIZAÇÃO (17/09/2026).** As seis cópias são idênticas e precisam continuar idênticas. Alteração no mapa atualiza **os seis repositórios no mesmo ciclo** — nunca um e "os outros depois". Foi exatamente isso que fez as cópias divergirem duas vezes em 17/09: uma foi atualizada e as outras ficaram para depois. "Depois" não aconteceu.
 >
+>
+> A mesma regra vale para as duas cadeiras transversais da equipe: `.claude/skills/gabinete/` e `.claude/skills/guarda/` (seção 15). E conferir se as cópias batem deixou de depender de disciplina: virou a **primeira tarefa do Gabinete em toda sessão**.
+>
 > A cópia existe em todos porque a sessão do Claude Code começa em **um** repositório e lê o mapa dali sozinha. Quem trabalha no `moviki-robo` precisa da tabela de planos e das coleções; quem trabalha no `moviki` precisa das regras de LGPD da vitrine. Centralizar num repositório só obrigaria a pedir anexo em toda sessão — fricção permanente no Paulo para resolver um problema de disciplina de quem edita.
 
 > Levantado por leitura direta dos repositórios em 17/09/2026. O que não foi possível confirmar está marcado como **a confirmar**.
@@ -277,7 +280,31 @@ Regras da nota:
 3. **`MOVIKI_MAPA_MESTRE.md` é citado pelos repositórios mas não existe em nenhum deles** — vivia num Project do Claude. Este arquivo passa a ser o mapa mestre, dentro do repositório, onde o Claude Code lê sozinho.
 4. O comando `/atualizarmapa` dos arquivos antigos foi mantido em espírito: **ao terminar uma alteração relevante, atualizar a seção correspondente deste arquivo no mesmo Pull Request.**
 
-## 15. Histórico de decisões
+## 15. A equipe — quem cuida de quê
+
+Desde 17/09/2026 o Moviki tem um time de especialistas gravado nos repositórios. Cada cadeira é dona de uma parte da empresa, já sabe as regras da área dela e trabalha sozinha dentro delas. O Paulo convoca pelo nome (`/gabinete`, `/tesouraria`, …), ou pede o que quer e o Gabinete convoca por ele.
+
+| Cadeira | De que cuida | Onde mora |
+|---|---|---|
+| **Gabinete** | Coordenação, memória, mapa mestre, ordem de aprovação dos Pull Requests | Nos cinco repositórios de código |
+| **Guarda** | Segurança, regras do Firestore e do Storage, LGPD, segredos | Nos cinco (com veto em todos) |
+| **Tesouraria** | Dinheiro: assinatura, Asaas, webhook, comissão, saque, preço | `moviki-robo` |
+| **Vitrine** | Site público, página de cada negócio, live pública, SEO, termos | `moviki` |
+| **Balcão** | Painel do lojista, live do lojista, videoaulas, painel do dono | `moviki-app` |
+| **Canal** | Parceiros: recrutamento, painel, material de apoio, treinamento | `moviki-app` |
+| **Atendimento** | Atendentes de IA do WhatsApp e da caixa do painel | `moviki-ai` |
+| **Praça** | Publicação no Instagram e no Facebook, calendário, compliance | `moviki-assistente-social` |
+
+Como o time funciona:
+
+- **Cada cadeira mora no repositório que governa.** Quem abre uma sessão no `moviki-robo` já recebe a Tesouraria sabendo as regras do dinheiro, sem precisar explicar nada.
+- **Gabinete e Guarda moram em todos**, porque coordenação e vazamento não respeitam fronteira de repositório. Por isso entram na regra de sincronização do topo deste arquivo.
+- **Toda cadeira tem escrito o que decide sozinha e o que sobe para o Paulo.** Ordem direta dele vence a regra da cadeira; quando a ordem colide com dinheiro ou segurança, a cadeira explica o risco em uma frase, pede confirmação e registra no histórico que foi decisão consciente.
+- **A skill `material-de-apoio` continua existindo** como ferramenta do Canal para a aba de artes do parceiro.
+- **Cadeira parada 60 dias** o Gabinete traz para revisão: ou ganha trabalho recorrente, ou é fundida com outra. Especialista que ninguém chama vira arquivo morto e polui toda sessão.
+- **Criar, fundir ou aposentar cadeira é decisão do Paulo.**
+
+## 16. Histórico de decisões
 
 - 16/09/2026: plano trimestral aposentado.
 - 17/09/2026: `moviki-ai` separado do `moviki-robo` para isolar o teto de 12 funções do plano Hobby e proteger o robô do dinheiro.
@@ -288,4 +315,7 @@ Regras da nota:
 - 17/09/2026: regras do Firestore e do Storage trazidas para dentro do repositório (`moviki-app/firebase/`). Antes viviam só no console do Firebase: sem revisão, sem histórico e sem como voltar de uma alteração feita por engano.
 - 17/09/2026: curinga `match /{documento=**}` removido de `negocios/{uid}` (regras v26). Ele anulava em silêncio o `hasOnly` do cadastro, deixava público o e-mail do lojista em `estado/liveAceite`, e faria qualquer subcoleção futura nascer pública. Regras passaram a ter teste automático.
 - 17/09/2026: teto de uso criado no atendente do WhatsApp. Ele falava com desconhecido sem limite nenhum, e cada mensagem é uma chamada paga à Anthropic — a assinatura da Meta barra chamada forjada, não pessoa real insistindo.
+- 17/09/2026: videoaulas — a biblioteca "Aulas da live" deixou de ser repintada por cima do vídeo que está tocando (era isso que fazia a aula cortar sozinha perto do fim), e as aulas da live passaram a medir **caminho percorrido** em vez de posição da agulha, como o painel do lojista e o do parceiro já faziam desde 15/09. Arrastar o vídeo até o fim deixou de marcar a aula como assistida; o quanto falta passou a aparecer numa barra, porque trava sem medidor visível vira reclamação. O progresso de cada aula agora sobrevive a fechar e recarregar a página (fica no navegador, por conta, nunca no banco).
 - 17/09/2026: mapa mantido em **cópia completa nos seis repositórios**, com regra explícita de sincronização no topo deste arquivo. Cogitou-se centralizar numa cópia só, com ponteiro nas outras; descartado porque obrigaria a pedir anexo do `moviki-app` em toda sessão iniciada em outro repositório — fricção permanente para resolver um problema que é de disciplina de quem edita, não de estrutura.
+- 17/09/2026: mapa divergiu pela **terceira vez** — a linha das videoaulas existia só na cópia do `moviki-app`. Corrigido, e a conferência das seis cópias deixou de ser disciplina de quem edita: virou a primeira tarefa do Gabinete em toda sessão. Regra sem dono é regra que volta a quebrar.
+- 17/09/2026: **equipe de especialistas criada** — oito cadeiras, cada uma dona de uma parte da empresa, gravadas dentro dos repositórios. Antes, toda sessão começava sem saber as regras da área que ia mexer, e o Paulo era o único ponto de memória do negócio. O time nasceu completo por decisão dele, contra a recomendação de começar com três: fica valendo a revisão aos 60 dias para a cadeira que não tiver uso.
