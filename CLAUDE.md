@@ -168,7 +168,7 @@ Por isso existe uma regra única:
 |---|---|---|
 | **Claude Code** | Sim, sozinho | Lê a `CLAUDE.md` do repositório no início de toda sessão |
 | **Claude do navegador** | Só se o Paulo conectar o GitHub ao Project, ou subir o arquivo no conhecimento | Precisa ser atualizado quando o arquivo muda |
-| **Obsidian** | Sim, pelo `.bat` da área de trabalho | O Paulo coloca o `.md` ao lado do `.bat`, roda, e entra no cofre |
+| **Obsidian** | Sim, nos dois sentidos | O `.bat` leva o `.md` da área de trabalho para o cofre **e** sobe para o `moviki-vault` o que o Paulo escreveu no Obsidian |
 
 ### Obrigação ao terminar qualquer alteração relevante
 
@@ -193,12 +193,20 @@ Antes de confiar em qualquer resumo, **ler este arquivo no repositório, ao vivo
 
 ### Como entregar anotação para o Obsidian do Paulo
 
-O Paulo tem, na área de trabalho, um arquivo `.bat` que joga qualquer `.md` colocado ao lado dele dentro do Obsidian. Então **a forma de alimentar a memória dele é entregar um `.md` pronto no chat** — ele arrasta para a área de trabalho e roda o `.bat`.
+O Paulo tem, na área de trabalho, o `.bat` **SincronizarVaultMoviki**. Ele pega os `.md` (e `.zip`) da área de trabalho, guarda cada um na pasta certa do cofre **pelo prefixo do nome**, e depois faz commit e push no `moviki-vault`. Então **a forma de alimentar a memória dele é entregar um `.md` pronto no chat** — ele arrasta para a área de trabalho e roda o `.bat`.
 
-Ao terminar uma alteração relevante, além de atualizar este mapa no Pull Request, **entregar também uma nota de diário** seguindo exatamente este formato:
+É **mão dupla**: o que o Paulo escreve dentro do Obsidian também sobe para o `moviki-vault` quando ele roda o `.bat`. Ou seja, anotação dele chega até aqui na conversa seguinte.
 
-**Nome do arquivo:** `AAAA-MM-DD Moviki — <assunto curto>.md`
-(exemplo: `2026-09-17 Moviki — desconto por item.md`)
+### O prefixo do nome é obrigatório
+
+O `.bat` decide a pasta **pelo começo do nome**. Nome fora do padrão é **ignorado** e fica parado na área de trabalho. O prefixo reservado para o diário do projeto é **`MOVIKI `** (vai para `01-Projetos\Moviki - Diario`).
+
+**Nome do arquivo:** `MOVIKI AAAA-MM-DD - <assunto curto>.md`
+(exemplo: `MOVIKI 2026-09-17 - desconto por item.md`)
+
+- Usar **hífen comum** (`-`), nunca travessão (`—`): nome de arquivo no Windows não aceita bem.
+- Outros prefixos que o `.bat` conhece: `P..` (projetos), `A.` (áreas), `R` (recursos), `ARQ ` (arquivo), `T-` (templates), `_Indice`, `000 `, `LEIA-ME`, `README`, `Inbox`.
+- Para entregar **vários arquivos de uma vez**, mandar um `.zip` já com as pastas dentro (ex.: `01-Projetos\Moviki - Diario\nota.md`). O `.bat` respeita a estrutura do zip e ignora o prefixo.
 
 **Conteúdo:**
 
@@ -228,7 +236,7 @@ tags: [moviki, alteracao]
 ## Pendências
 <o que ficou para depois, e por quê>
 
-Ver também: [[Moviki — Mapa Mestre]]
+Ver também: [[Moviki - Mapa Mestre]]
 ```
 
 Regras da nota:
@@ -262,4 +270,5 @@ Regras da nota:
 - 17/09/2026: `moviki-ai` separado do `moviki-robo` para isolar o teto de 12 funções do plano Hobby e proteger o robô do dinheiro.
 - 17/09/2026: mapa mestre trazido para dentro dos repositórios como `CLAUDE.md`, passando a ser a memória oficial do projeto.
 - 17/09/2026: `moviki-platform` autorizado a ser apagado pelo Paulo — estava vazio, nunca foi usado.
-- 17/09/2026: definido o formato da nota de diário entregue ao Obsidian (seção 12), aproveitando o `.bat` que o Paulo já tem na área de trabalho.
+- 17/09/2026: definido o formato da nota de diário entregue ao Obsidian (seção 12), com o prefixo `MOVIKI ` que o `.bat` reconhece.
+- 17/09/2026: `.bat` de sincronização corrigido — passou a trazer do GitHub antes de enviar, e a subir também o que o Paulo escreve dentro do Obsidian. Antes, anotação feita direto no Obsidian nunca saía do computador.
