@@ -168,7 +168,7 @@ Por isso existe uma regra única:
 |---|---|---|
 | **Claude Code** | Sim, sozinho | Lê a `CLAUDE.md` do repositório no início de toda sessão |
 | **Claude do navegador** | Só se o Paulo conectar o GitHub ao Project, ou subir o arquivo no conhecimento | Precisa ser atualizado quando o arquivo muda |
-| **Obsidian** | Sim, se o cofre sincronizar com o `moviki-vault` | O que for gravado no repositório aparece no Obsidian dele |
+| **Obsidian** | Sim, pelo `.bat` da área de trabalho | O Paulo coloca o `.md` ao lado do `.bat`, roda, e entra no cofre |
 
 ### Obrigação ao terminar qualquer alteração relevante
 
@@ -190,6 +190,54 @@ Correção de texto, ajuste visual e conserto de bug que não muda comportamento
 ### Regra para quem for continuar por outro caminho
 
 Antes de confiar em qualquer resumo, **ler este arquivo no repositório, ao vivo**. Índice de Project e memória de conversa antiga ficam desatualizados; o repositório não.
+
+### Como entregar anotação para o Obsidian do Paulo
+
+O Paulo tem, na área de trabalho, um arquivo `.bat` que joga qualquer `.md` colocado ao lado dele dentro do Obsidian. Então **a forma de alimentar a memória dele é entregar um `.md` pronto no chat** — ele arrasta para a área de trabalho e roda o `.bat`.
+
+Ao terminar uma alteração relevante, além de atualizar este mapa no Pull Request, **entregar também uma nota de diário** seguindo exatamente este formato:
+
+**Nome do arquivo:** `AAAA-MM-DD Moviki — <assunto curto>.md`
+(exemplo: `2026-09-17 Moviki — desconto por item.md`)
+
+**Conteúdo:**
+
+```
+---
+data: AAAA-MM-DD
+projeto: Moviki
+repos: [moviki-app, moviki-robo]
+pr: <link do Pull Request>
+tags: [moviki, alteracao]
+---
+
+# <Assunto>
+
+## O que mudou
+<em linguagem de negócio, o que o lojista/parceiro/Paulo passa a ver>
+
+## Por quê
+<o problema que existia, ou o pedido que originou>
+
+## Decisões tomadas
+<escolhas que fecham porta: o que passou a ser proibido, o que foi aposentado>
+
+## O que conferir
+<o que o Paulo deve testar, e em qual endereço>
+
+## Pendências
+<o que ficou para depois, e por quê>
+
+Ver também: [[Moviki — Mapa Mestre]]
+```
+
+Regras da nota:
+
+- **Uma nota por alteração**, não uma por dia. Assunto misturado não serve de memória.
+- **Linguagem de negócio**, sem código. A nota é para o Paulo reler em três meses, não para um programador.
+- **Registrar o porquê, não só o quê.** O "o quê" está no Pull Request; o "por quê" só existe se for escrito.
+- Se a alteração **não** entra no mapa (texto, cor, bug sem mudança de comportamento), **não** gera nota. Diário inflado ninguém lê.
+- Nunca colocar chave, senha ou token na nota.
 
 ## 13. Segurança — situação verificada em 17/09/2026
 
@@ -214,3 +262,4 @@ Antes de confiar em qualquer resumo, **ler este arquivo no repositório, ao vivo
 - 17/09/2026: `moviki-ai` separado do `moviki-robo` para isolar o teto de 12 funções do plano Hobby e proteger o robô do dinheiro.
 - 17/09/2026: mapa mestre trazido para dentro dos repositórios como `CLAUDE.md`, passando a ser a memória oficial do projeto.
 - 17/09/2026: `moviki-platform` autorizado a ser apagado pelo Paulo — estava vazio, nunca foi usado.
+- 17/09/2026: definido o formato da nota de diário entregue ao Obsidian (seção 12), aproveitando o `.bat` que o Paulo já tem na área de trabalho.
