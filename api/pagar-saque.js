@@ -1,4 +1,4 @@
-// api/pagar-saque.js | versao 2026-09-16-saque1  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')  (repo: moviki-robo)
 // Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
 // a permissão é conferida AQUI no servidor, não dá para burlar pelo app.
 //
@@ -43,6 +43,8 @@ const VALOR_MAX_TESTE = 10;
    CPF e celular têm os mesmos 11 dígitos — quem desempata é a
    consulta no Asaas.
    --------------------------------------------------------------- */
+function brlTxt(n) { return 'R$ ' + (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
 function cpfValido(c) {
   if (!/^\d{11}$/.test(c) || /^(\d)\1{10}$/.test(c)) return false;
   let s = 0;
@@ -244,7 +246,7 @@ module.exports = async (req, res) => {
 
     // 2) De quem estamos falando e até que data vale o corte.
     const avulso = !saqueId;                 // pagamento direto pela linha do parceiro
-    let saqueRef = null, parceiroUid = null, corte = null, retomarQuitacao = false;
+    let saqueRef = null, parceiroUid = null, corte = null, retomarQuitacao = false, valorPedido = 0;
 
     if (!avulso) {
       saqueRef = db.collection('saques').doc(saqueId);
@@ -263,6 +265,7 @@ module.exports = async (req, res) => {
       }
       parceiroUid = saque.parceiroUid;
       corte = saque.pedidoEm;
+      valorPedido = Number(saque.valorSolicitado) || 0;
     } else {
       parceiroUid = uidPedido;
       corte = admin.firestore.Timestamp.now();
@@ -316,11 +319,27 @@ module.exports = async (req, res) => {
 
     // ---------- etapa MANUAL: o dono pagou pelo banco, só registra ----------
     if (etapa === 'manual') {
+      /* 23/09/2026 (rodada 3) — O VALOR DO PEDIDO NAO E PROVA DE NADA.
+         O parceiro grava o proprio pedido de saque (a regra so exige entre
+         R$ 20 e R$ 5.000) e o card mostrava esse numero. Acima do teto do
+         automatico o dono paga no banco lendo o card: com R$ 30 liberados,
+         um pedido forjado de R$ 4.900 virava Pix de R$ 4.900. Agora:
+           - sem comissao liberada, nao registra (antes registrava R$ 0,00);
+           - o registro so fecha se o dono confirmar o valor CALCULADO aqui
+             (valorConferido), e a resposta avisa quando o pedido e maior. */
+      if (valor <= 0) {
+        res.status(409).json({ ok: false, erro: 'sem_valor',
+          mensagem: 'Este parceiro não tem comissão liberada para quitar agora. Nada foi registrado.' }); return;
+      }
+      const conferido = Math.round((Number(body.valorConferido) || 0) * 100) / 100;
+      if (Math.abs(conferido - valor) > 0.009) {
+        res.status(409).json({ ok: false, erro: 'confirme_valor', valor: valor, valorPedido: valorPedido,
+          mensagem: 'O valor liberado de verdade é ' + brlTxt(valor) +
+                    (valorPedido && Math.abs(valorPedido - valor) > 0.009 ? ' (o parceiro pediu ' + brlTxt(valorPedido) + ' — pague só o liberado)' : '') +
+                    '. Confirme que você pagou exatamente ' + brlTxt(valor) + '.' });
+        return;
+      }
       if (avulso) {
-        if (valor <= 0) {
-          res.status(409).json({ ok: false, erro: 'sem_valor',
-            mensagem: 'Este parceiro não tem comissão liberada para quitar.' }); return;
-        }
         saqueRef = db.collection('saques').doc();
       }
       const dadosSaque = {
@@ -496,12 +515,34 @@ module.exports = async (req, res) => {
           if (achada && stA !== 'CANCELLED' && stA !== 'FAILED') transf = achada;
         } catch (_) { /* não achou: cai no erro normal abaixo */ }
       }
+      /* 23/09/2026 (rodada 3): erro de rede ou 5xx NAO prova que o Pix nao
+         saiu — a transferencia pode ter sido criada e so a resposta se
+         perdeu. Antes a mensagem dizia "nenhum valor saiu" e induzia o dono
+         a pagar de novo na mao. Agora procura a transferencia pelo id do
+         saque; se nao der para saber, diz que NAO sabe. */
+      const incerto = !jaExiste && !(err && err.status >= 400 && err.status < 500);
+      if (!transf && incerto) {
+        try {
+          const busca2 = await asaas('/transfers?externalReference=' + encodeURIComponent(saqueRef.id), 'GET');
+          const achada2 = (busca2 && busca2.data && busca2.data[0]) || null;
+          const st2 = String((achada2 && achada2.status) || '').toUpperCase();
+          if (achada2 && st2 !== 'CANCELLED' && st2 !== 'FAILED') transf = achada2;
+        } catch (_) { /* segue incerto */ }
+      }
       if (!transf) {
         await saqueRef.update({
           pagamentoEmCursoEm: null,
-          ultimoErroPagamento: msg.slice(0, 200),
+          ultimoErroPagamento: (incerto ? 'SEM CONFIRMACAO do Asaas: ' : '') + msg.slice(0, 180),
           ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
         });
+        if (incerto) {
+          res.status(502).json({ ok: false, erro: 'asaas_incerto',
+            mensagem: 'O Asaas não respondeu e eu NÃO sei se o Pix saiu. NÃO pague na mão. ' +
+                      'Confira em Transferências no painel do Asaas. Se não estiver lá, clique em ' +
+                      '"Pagar via Pix agora" de novo daqui a alguns minutos — o Asaas recusa uma ' +
+                      'segunda transferência deste mesmo saque, então tentar de novo é seguro.' });
+          return;
+        }
         res.status(502).json({ ok: false, erro: 'asaas',
           mensagem: 'O Asaas recusou a transferência: ' + (msg || 'erro') +
                     '. Nenhum valor saiu e nada foi quitado.' });

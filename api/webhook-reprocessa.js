@@ -1,4 +1,4 @@
-// versao 2026-09-14-repro1
+// versao 2026-09-23-repro2 (esgotado vira 'desistido' e sai da fila)
 // GET /api/webhook-reprocessa  (cron de hora em hora, protegido por CRON_SECRET)
 //
 // Rede de seguranca do webhook do Asaas. Desde 14/09/2026 o /api/webhook
@@ -54,10 +54,20 @@ module.exports = async (req, res) => {
 
     // 1) Os que falharam.
     const comErro = await db.collection(COL).where('status', '==', 'erro').limit(MAX_POR_RODADA * 2).get();
+    const esgotados = [];
     comErro.forEach((d) => {
       const v = d.data() || {};
       if ((v.tentativas || 0) < MAX_TENTATIVAS) fila.push({ ref: d.ref, id: d.id, dados: v });
+      else esgotados.push(d.ref);
     });
+    /* 23/09 (rodada 3): esgotado sai da fila de 'erro' (vira 'desistido').
+       Antes ficava 'erro' para sempre e, juntando 40, a consulta so devolvia
+       esgotados — erro novo nunca mais era reprocessado. */
+    if (!soOlhar) {
+      for (const ref of esgotados) {
+        try { await ref.update({ status: 'desistido', atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
+      }
+    }
 
     // 2) Os que ficaram travados em 'processando' (funcao morreu no meio).
     if (fila.length < MAX_POR_RODADA) {
@@ -96,7 +106,7 @@ module.exports = async (req, res) => {
         const msg = (e && e.message) ? String(e.message).slice(0, 400) : 'erro';
         aindaFalhando++;
         const tentativas = (alvo.dados.tentativas || 0) + 1;
-        try { await alvo.ref.update({ status: 'erro', erro: msg, atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
+        try { await alvo.ref.update({ status: tentativas >= MAX_TENTATIVAS ? 'desistido' : 'erro', erro: msg, atualizadoEm: FV.serverTimestamp() }); } catch (_) {}
         if (tentativas >= MAX_TENTATIVAS) desistidos.push(alvo.id + ' — ' + msg);
       }
     }

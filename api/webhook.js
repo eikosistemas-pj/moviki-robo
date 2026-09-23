@@ -1,4 +1,4 @@
-// versao 2026-09-23-rodada2 (testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
+// versao 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
@@ -586,6 +586,32 @@ async function avisarDono(texto) {
   } catch (_) {}
 }
 
+/* 23/09/2026 (rodada 3) — pagamento de assinatura que nao era a atual:
+   ela passa a ser a atual; a outra so e cancelada se nao tiver nenhum
+   pagamento confirmado. Nunca lanca. */
+async function promoverAssinaturaPaga(uid, subPaga, subAtual) {
+  const r = { cancelada: false, outraPaga: false };
+  try {
+    await db.collection('faturamento').doc(uid).set({ asaasSubscriptionId: subPaga }, { merge: true });
+  } catch (e) { console.error('webhook: nao promovi a assinatura paga', uid, subPaga, (e && e.message) || e); return r; }
+  if (!subAtual) return r;
+  try {
+    const pays = await asaas('/subscriptions/' + encodeURIComponent(subAtual) + '/payments', 'GET');
+    const lista = (pays && pays.data) || [];
+    r.outraPaga = lista.some((p) => ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].indexOf(String(p.status || '').toUpperCase()) >= 0);
+    if (!r.outraPaga) {
+      try { await asaas('/subscriptions/' + encodeURIComponent(subAtual), 'DELETE'); r.cancelada = true; }
+      catch (e) { if (e && e.status === 404) r.cancelada = true; }
+      if (r.cancelada) {
+        await db.collection('faturamento').doc(uid).set({
+          assinaturasCanceladas: admin.firestore.FieldValue.arrayUnion(subAtual),
+        }, { merge: true });
+      }
+    }
+  } catch (e) { console.error('webhook: nao conferi a outra assinatura', subAtual, (e && e.message) || e); }
+  return r;
+}
+
 /* 23/09/2026 — De qual plano e o pagamento? Em ordem de confianca:
    1. o registro que o criar-assinatura gravou para AQUELA assinatura
       (faturamento/{uid}.assinaturasAsaas.{id});
@@ -766,12 +792,22 @@ async function processarEvento(evento, ctx) {
     const plano = pp.plano;
     const periodo = pp.periodo;
     if (deOutraAssinatura) {
+      /* 23/09/2026 (rodada 3): a assinatura PAGA vira a atual. Antes o plano
+         ligava, mas a assinatura "atual" continuava sendo a nova, nao paga — e o
+         vencimento ou a remocao DELA derrubava o plano que tinha sido pago.
+         Cenario: o lojista paga o boleto, o boleto leva 1-3 dias para
+         compensar, ele clica em Assinar de novo e depois o boleto antigo cai.
+         A outra assinatura so e cancelada se nao tiver nenhum pagamento
+         confirmado; se tiver, ele pagou duas vezes e o Paulo e avisado. */
+      const r = await promoverAssinaturaPaga(uid, subPaga, subAtual);
       await avisarDono(
         '⚠️ Pagamento de assinatura ANTIGA\n\n' +
         'Lojista (uid): ' + uid + '\n' +
-        'Assinatura paga: ' + subPaga + ' (' + plano + ' ' + periodo + ')\n' +
-        'Assinatura atual: ' + subAtual + '\n\n' +
-        'O plano foi liberado pelo que ele pagou. Confira no Asaas se a outra assinatura precisa ser cancelada, para nao cobrar em dobro.'
+        'Assinatura paga: ' + subPaga + ' (' + plano + ' ' + periodo + ') — virou a assinatura atual\n' +
+        'Assinatura que estava como atual: ' + subAtual + '\n\n' +
+        (r.outraPaga
+          ? 'ATENCAO: a outra assinatura TAMBEM tem pagamento confirmado. Ele pagou duas vezes — devolva um dos valores pelo Asaas.'
+          : (r.cancelada ? 'A outra assinatura, sem pagamento, foi cancelada no Asaas.' : 'Nao consegui cancelar a outra assinatura: cancele no Asaas para nao cobrar em dobro.'))
       );
     }
 
@@ -808,10 +844,26 @@ async function processarEvento(evento, ctx) {
     try { await registrarPurchase(uid, plano, periodo, payReal); }
     catch (ge) { console.error('purchase medicao erro:', ge); }
   } else {
-    await ref.set({
-      ativo: false,
-      atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    /* 23/09/2026 (rodada 3): quem pagou DURANTE o teste gratis e pede
+       reembolso (ou tem o pagamento estornado) volta para o TESTE ate o fim
+       dele — antes caia direto no Basico e perdia os dias de teste que ainda
+       tinha. testeAte e a data que o webhook guardou quando ele pagou. */
+    const testeAteMs = (atualDoc.testeAte && typeof atualDoc.testeAte.toMillis === 'function') ? atualDoc.testeAte.toMillis() : 0;
+    if (testeAteMs > Date.now()) {
+      await ref.set({
+        plano: 'pro',
+        periodo: 'trial',
+        ativo: true,
+        vence_em: atualDoc.testeAte,
+        testeAte: admin.firestore.FieldValue.delete(),
+        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    } else {
+      await ref.set({
+        ativo: false,
+        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
 
     // Estorno ou chargeback -> anula a comissao daquele pagamento (clawback).
     // Vencimento/exclusao comum NAO estornam comissao de meses ja pagos.

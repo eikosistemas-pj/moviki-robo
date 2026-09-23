@@ -1,5 +1,5 @@
-// api/exclusoes.js | versao 2026-09-23-exclusao3  (repo: moviki-robo)
-// 2026-09-23: cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
+// api/exclusoes.js | versao 2026-09-23-exclusao4  (repo: moviki-robo)
+// 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
 // Painel do dono -> Exclusoes. Dois modos (campo "action"):
 //   - "listar":  devolve os pedidos de exclusao pendentes (status 'solicitado').
 //   - "excluir": APAGA DE VERDADE a conta do uid informado — cancela a assinatura
@@ -76,13 +76,16 @@ const COLECOES_POR_CAMPO = [
   { colecao: 'lives',     campo: 'lojistaUid' },
   { colecao: 'denuncias', campo: 'lojistaUid' },
   { colecao: 'moderacao', campo: 'lojistaUid' },
+  // 23/09 (rodada 3): pecas do criador (o documento aponta para os arquivos apagados acima)
+  { colecao: 'criador_pecas', campo: 'uid' },
 ];
 
 const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
 
 // Apaga os arquivos do usuario no Storage.
 async function apagarArquivos(uid, resumo) {
-  const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/'];
+  // 23/09 (rodada 3): + criadores/ (fotos e videos do criador, com o rosto dele) e capas/ (capa de video).
+  const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/', 'criadores/' + uid + '/', 'capas/' + uid + '/'];
   for (const prefix of alvos) {
     try {
       await admin.storage().bucket(BUCKET).deleteFiles({ prefix: prefix, force: true });
@@ -341,6 +344,18 @@ module.exports = async (req, res) => {
       /* ==========================================================
          5) Colecoes de topo com o uid num CAMPO.
          ========================================================== */
+      /* 23/09 (rodada 3): comprovantes Pix dos compradores. O pedido some logo
+         abaixo e o arquivo ficava orfao no Storage, com CPF/nome de terceiro. */
+      try {
+        const pq = await db.collection('pedidos').where('lojistaUid', '==', uid).get();
+        for (const d of pq.docs) {
+          const c = (d.data() || {}).comprovante;
+          if (typeof c === 'string' && c.indexOf('comprovantes/') === 0) {
+            try { await admin.storage().bucket(BUCKET).file(c).delete(); resumo.comprovantes = (resumo.comprovantes || 0) + 1; } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
       for (const alvo of COLECOES_POR_CAMPO) {
         try {
           resumo[alvo.colecao] = await apagarDaConsulta(
