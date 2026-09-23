@@ -58,6 +58,7 @@ Este arquivo é lido pelo Claude Code no início de toda sessão. Ele vale para 
 10. **Nunca cobrar um valor que a tela não mostrou.** O `criar-assinatura.js` recusa com 400 período que não existe mais.
 11. **O painel `index.html` tem dois escopos isolados**: script module (Firebase) e script comum (JQuery/UI). Respeitar os escopos.
 12. **GitHub Actions no plano gratuito tem limite mensal de minutos.** Não aumentar a frequência das rotinas sem avisar o Paulo.
+13. **Subiu `index.html` ou `parceiro.html`, sobe junto o Vik — na MESMA entrega.** O Vik conhece as telas pela tabela `MARCAS_CONFERIDAS` em `moviki-ai/lib/catalogoPainel.js`. Marca nova no painel sem a tabela = Vik em **modo cauteloso para todos**, sem nenhum sintoma na tela (aconteceu em 16/09 três vezes, 22/09 e 23/09). Toda entrega que muda um desses dois painéis inclui: (a) a marca nova em `MARCAS_CONFERIDAS`; (b) o texto do catálogo com o que o cliente passa a ver (seção, botão, regra, preço); (c) `CATALOGO_VERSAO` novo. Se a entrega for de outro chat, quem conferir depois fecha essa ponta antes de qualquer outra coisa. O painel do dono acende "Precisa de você" quando as marcas divergem (desde 23/09).
 
 ## 5. Arquitetura — quem chama quem
 
