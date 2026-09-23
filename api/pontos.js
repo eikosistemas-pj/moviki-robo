@@ -1,3 +1,4 @@
+// versao 2026-09-23-seguranca (freio de 120 buscas de endereco por hora por conta)
 // api/pontos.js  (repo: moviki-robo) | versao 2026-09-15-livesessao
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
 // O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
@@ -15,6 +16,7 @@
 // permite no máximo 12 Serverless Functions, e o projeto já está no teto.
 
 const { db, admin } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');
 const { asaas, PONTO_EXTRA, PONTOS_INCLUSOS } = require('../lib/asaas');
 // 11/09/2026: checkout Pix da live (Enterprise) entra como ETAPA daqui — o
 // projeto esta no teto de 12 funcoes. Acoes 'loja_*' e 'compra_*'.
@@ -100,6 +102,16 @@ module.exports = async (req, res) => {
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
     const uid = decoded.uid;
+
+    /* 23/09/2026 (seguranca): a busca de endereco cai na fatura do Google e
+       atendia qualquer conta logada sem limite. Teto por usuario: 120 buscas
+       por hora (digitar um endereco com calma gasta umas 10-15). */
+    if (acao === 'sugestoes' || acao === 'detalhe') {
+      if (!(await freioUid(admin, db, 'places', uid, 120, 3600000))) {
+        res.status(429).json({ ok: false, erro: 'Muitas buscas de endereço seguidas. Espere alguns minutos e tente de novo.', motivo: 'freio' });
+        return;
+      }
+    }
 
     // ---- AUTOCOMPLETE DE ENDEREÇO (Google Places New) ----
     if (acao === 'sugestoes') {

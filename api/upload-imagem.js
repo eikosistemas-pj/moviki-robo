@@ -1,4 +1,4 @@
-// api/upload-imagem.js  (repo: moviki-robo)
+// api/upload-imagem.js  (repo: moviki-robo) | versao 2026-09-23-seguranca (bytes conferidos, freio por conta, aviso de foto de parceiro)
 // Recebe uma imagem (base64) do painel do lojista e sobe no Firebase Storage.
 // Três modos:
 //   - tipo 'logo' (padrão): grava a URL em negocios/{uid}.markerLogo (logo do pino).
@@ -21,6 +21,18 @@
 // (IMGBB_API_KEY não é mais necessária — removida)
 
 const { db, admin } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');
+
+async function avisarDonoFoto(texto) {
+  const TOKEN = process.env.TELEGRAM_TOKEN, CHAT = process.env.TELEGRAM_CHAT_ID;
+  if (!TOKEN || !CHAT) return;
+  try {
+    await fetch('https://api.telegram.org/bot' + TOKEN + '/sendMessage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT, text: texto, disable_web_page_preview: true }),
+    });
+  } catch (_) {}
+}
 const { espelharPorUid } = require('../lib/espelhoParceiro');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
@@ -60,6 +72,9 @@ module.exports = async (req, res) => {
     // FOTO DE PERFIL DO PARCEIRO — 10/09/2026. Não toca no Storage.
     // -----------------------------------------------------------------------
     if (ehParceiro) {
+      if (!(await freioUid(admin, db, 'fotoparceiro', decoded.uid, 20, 3600000))) {
+        res.status(429).json({ ok: false, erro: 'Muitas trocas de foto seguidas. Espere alguns minutos.', motivo: 'freio' }); return;
+      }
       const foto = imagemBase64.trim();
       if (foto && !/^data:image\/(jpeg|png|webp);base64,/.test(foto)) {
         res.status(400).json({ ok: false, erro: 'formato de imagem nao aceito' }); return;
@@ -84,6 +99,21 @@ module.exports = async (req, res) => {
       // abertura do painel.
       const esp = await espelharPorUid(admin, db, decoded.uid);
 
+      /* 23/09/2026 (seguranca): a foto do parceiro APROVADO vai direto para o
+         cracha publico (/v/). Trocar por um logo do Moviki ou pela foto de
+         outra pessoa e o jeito mais simples de se passar por "equipe". Nao
+         trava a troca (seria atrito para todo mundo), mas avisa o dono na
+         hora, com o link do cracha para conferir. */
+      try {
+        const pd = snap.data() || {};
+        if (pd.status === 'aprovado' && foto) {
+          await avisarDonoFoto('🖼️ Parceiro aprovado trocou a foto do crachá\n\n' +
+            'Nome: ' + String(pd.nome || '').slice(0, 80) + '\n' +
+            (pd.slug ? 'Confira: https://www.moviki.com.br/v/' + pd.slug + '\n' : '') +
+            '\nSe a foto não for dele, suspenda no painel do dono — o crachá cai na hora.');
+        }
+      } catch (_) {}
+
       res.status(200).json({ ok: true, foto, espelho: esp.ok === true, slug: esp.slug || null });
       return;
     }
@@ -91,9 +121,27 @@ module.exports = async (req, res) => {
     // tira o prefixo "data:image/...;base64," se vier
     const b64 = imagemBase64.includes(',') ? imagemBase64.split(',').pop() : imagemBase64;
 
+    /* 23/09/2026 (seguranca): o Storage virava hospedagem gratis — qualquer
+       conta logada subia ate 2 MB por chamada, sem conferir o conteudo e sem
+       limite, gravado publico com cache de 1 ano. Agora:
+         - so passa JPEG, PNG ou WebP DE VERDADE (conferido pelos bytes);
+         - teto de 60 envios por hora por conta. */
+    const bufConf = Buffer.from(b64.slice(0, 64), 'base64');
+    const ehJpg = bufConf[0] === 0xFF && bufConf[1] === 0xD8 && bufConf[2] === 0xFF;
+    const ehPng = bufConf[0] === 0x89 && bufConf[1] === 0x50 && bufConf[2] === 0x4E && bufConf[3] === 0x47;
+    const ehWebp = bufConf.slice(0, 4).toString('latin1') === 'RIFF' && bufConf.slice(8, 12).toString('latin1') === 'WEBP';
+    if (!ehJpg && !ehPng && !ehWebp) {
+      res.status(400).json({ ok: false, erro: 'o arquivo não é uma imagem JPG, PNG ou WebP' }); return;
+    }
+    if (!(await freioUid(admin, db, 'upload', decoded.uid, 60, 3600000))) {
+      res.status(429).json({ ok: false, erro: 'Muitos envios de imagem seguidos. Espere alguns minutos e tente de novo.', motivo: 'freio' }); return;
+    }
+    const tipoReal = ehPng ? 'image/png' : (ehWebp ? 'image/webp' : 'image/jpeg');
+    const extReal = ehPng ? 'png' : (ehWebp ? 'webp' : 'jpg');
+
     const ehProduto = tipo === 'produto';
     const pasta = ehProduto ? 'produtos' : 'logos';
-    const fileName = `${pasta}/${decoded.uid}/${Date.now()}.jpg`;
+    const fileName = `${pasta}/${decoded.uid}/${Date.now()}.${extReal}`;
 
     // Upload para Firebase Storage via Admin SDK — bucket EXPLÍCITO
     const bucket = admin.storage().bucket(STORAGE_BUCKET);
@@ -102,7 +150,7 @@ module.exports = async (req, res) => {
 
     await file.save(buffer, {
       metadata: {
-        contentType: 'image/jpeg',
+        contentType: tipoReal,
         cacheControl: 'public,max-age=31536000', // 1 ano
       },
       public: true, // torna o arquivo público (qualquer um com a URL acessa)
@@ -133,7 +181,7 @@ module.exports = async (req, res) => {
     } else if (code === 'NOT_FOUND' || msg.includes('bucket')) {
       res.status(500).json({ ok: false, erro: 'bucket não encontrado (confira nome: moviki-app.firebasestorage.app)', motivo: 'bucket_nao_existe' });
     } else {
-      res.status(500).json({ ok: false, erro: 'erro interno no upload', detalhe: msg });
+      res.status(500).json({ ok: false, erro: 'erro interno no upload' });  // 23/09: detalhe interno so no log, nunca para o navegador
     }
   }
 };

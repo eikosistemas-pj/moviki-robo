@@ -67,7 +67,7 @@ const BUCKET = process.env.FIREBASE_STORAGE_BUCKET || 'moviki-app.firebasestorag
 const DOCS_POR_UID = [
   'assinaturas', 'indicacoes', 'avisos_cliente', 'recebimento',
   'live_sessoes', 'live_cota', 'live_throttle', 'live_bloqueios',
-  'checkout_publico', 'checkout_contas', 'vik_memoria',
+  'checkout_publico', 'checkout_contas', 'vik_memoria', 'vik_reserva',
 ];
 
 // Colecoes de topo que guardam o uid do lojista num CAMPO.

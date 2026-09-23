@@ -21,7 +21,7 @@
 //    instantânea/robótica.
 //
 // 2) GET ou POST com ?processarPendentes=1 + Authorization: Bearer
-//    CRON_SECRET (ou ?secret=CRON_SECRET) — chamado por um agendamento
+//    CRON_SECRET no cabecalho Authorization (na URL deixou de valer em 23/09) — chamado por um agendamento
 //    EXTERNO (GitHub Actions, a cada poucos minutos; o cron nativo da Vercel
 //    no plano Hobby só roda 1x/dia, não serve pra isso). Varre parceiros
 //    "pendente" com aprovacaoAutomaticaParceiros ligado e criadoEm mais
@@ -130,7 +130,7 @@ async function buscarInstagram(req, res) {
     || 'desconhecido';
 
   // MODO DIAGNOSTICO — 03/09/2026.
-  // Com ?instagram=natgeo&secret=<CRON_SECRET> a resposta traz a mensagem CRUA
+  // Com ?instagram=natgeo e o cabecalho Authorization: Bearer <CRON_SECRET> a resposta traz a mensagem CRUA
   // que a Meta devolveu, e a busca ignora o cache. Existe porque a primeira
   // versao disto foi ao ar e devolvia "conta pessoal" pra @natgeo: o erro real
   // era de configuracao, mas do lado de fora os dois eram indistinguiveis e
@@ -138,7 +138,7 @@ async function buscarInstagram(req, res) {
   // Protegido pelo CRON_SECRET (o mesmo do branch 2) — a mensagem de erro da
   // Meta as vezes cita o nosso id, entao nao pode ficar aberta pra qualquer um.
   const segredo = process.env.CRON_SECRET;
-  const diag = !!segredo && String(q.secret || '') === segredo;
+  const diag = !!segredo && String(req.headers.authorization || '') === 'Bearer ' + segredo; // 23/09: diagnostico so com o segredo no cabecalho
 
   try {
     const r = await buscarPerfil(admin, db, q.instagram, { ip: diag ? null : ip, semCache: diag });
@@ -302,7 +302,7 @@ async function processarPendentes(req, res) {
 
   const q = req.query || {};
   const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
-  const viaQuery     = String(q.secret || '') === secret;
+  const viaQuery     = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
   if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
   try {

@@ -10,7 +10,7 @@
 // pelas regras do Firestore).
 //
 // Env no Vercel (moviki-robo): CRON_SECRET, RESEND_API_KEY, FIREBASE_SERVICE_ACCOUNT.
-// Testar no navegador (simula, nunca envia): ?secret=...&dry=1
+// Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
 
 const { admin, db } = require('../lib/firebase');
 
@@ -31,7 +31,7 @@ module.exports = async (req, res) => {
 
     const q = req.query || {};
     const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
-    const viaQuery     = String(q.secret || '') === secret;
+    const viaQuery     = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
     const enviarDeVerdade = viaCabecalho && String(q.dry || '') !== '1';

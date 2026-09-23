@@ -67,7 +67,11 @@ async function escopoDoToken(token) {
   } catch (_) {}
   /* Token compartilhado antigo. So sobrevive enquanto a env existir; apague-a
      depois de rotacionar as subcontas (adm_wh_rotacionar). */
-  if (mesmoToken(token, process.env.ASAAS_WEBHOOK_TOKEN_PEDIDOS)) return { escopo: 'legado', uid: '' };
+  /* 23/09/2026 (seguranca): o token compartilhado antigo das subcontas
+     (ASAAS_WEBHOOK_TOKEN_PEDIDOS) deixou de ser aceito. Ele era o mesmo para
+     todas as subcontas e o lojista enxerga esse token no proprio Asaas.
+     Subconta de verdade usa o token proprio dela (checkout_tokens). Apague a
+     env na Vercel. */
   return null;
 }
 

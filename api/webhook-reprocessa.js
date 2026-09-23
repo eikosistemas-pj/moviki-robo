@@ -44,7 +44,7 @@ module.exports = async (req, res) => {
 
     const q = req.query || {};
     const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
-    const viaQuery = String(q.secret || '') === secret;
+    const viaQuery = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
     const soOlhar = String(q.dry || '') === '1';
