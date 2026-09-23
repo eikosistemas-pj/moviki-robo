@@ -11,6 +11,10 @@
     {
       "path": "/api/pedidos-confere",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/novo-parceiro?processarPendentes=1",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
