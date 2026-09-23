@@ -1,4 +1,5 @@
-// versao 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
+// versao 2026-09-23-assinatura (plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
+// anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
 // Aqui a gente LIGA o plano quando o pagamento entra e DESLIGA quando vence
@@ -569,6 +570,47 @@ async function avisarDono(texto) {
   } catch (_) {}
 }
 
+/* 23/09/2026 — De qual plano e o pagamento? Em ordem de confianca:
+   1. o registro que o criar-assinatura gravou para AQUELA assinatura
+      (faturamento/{uid}.assinaturasAsaas.{id});
+   2. a propria assinatura no Asaas, casando valor + ciclo com a tabela PLANOS;
+   3. (legado, assinatura criada antes de 23/09) o plano/periodo de
+      assinaturas/{uid}, se for um periodo pago valido.
+   Sem resposta confiavel devolve null — quem chamou lanca erro (reprocessa e
+   avisa), em vez de liberar um plano no chute. */
+function casarPlano(valor, ciclo) {
+  const v = Math.round(Number(valor) * 100);
+  const c = String(ciclo || '').toUpperCase();
+  for (const pl of Object.keys(PLANOS)) {
+    for (const pe of Object.keys(PLANOS[pl])) {
+      const cfg = PLANOS[pl][pe];
+      if (Math.round(cfg.value * 100) === v && (!c || cfg.cycle === c)) return { plano: pl, periodo: pe };
+    }
+  }
+  return null;
+}
+
+async function planoDaAssinatura(uid, subId, fat, atualDoc, pay) {
+  const valido = (pl, pe) => !!(pl && pe && PLANOS[pl] && PLANOS[pl][pe]);
+  const mapa = (fat && fat.assinaturasAsaas) || {};
+  if (subId && mapa[subId] && valido(mapa[subId].plano, mapa[subId].periodo)) {
+    return { plano: mapa[subId].plano, periodo: mapa[subId].periodo, fonte: 'registro' };
+  }
+  if (subId) {
+    try {
+      const s = await asaas('/subscriptions/' + encodeURIComponent(subId), 'GET');
+      if (s && String(s.externalReference || '') === String(uid)) {
+        const m = casarPlano(s.value, s.cycle);
+        if (m) return Object.assign(m, { fonte: 'asaas' });
+      }
+    } catch (e) { console.error('webhook: nao li a assinatura no Asaas', subId, (e && e.message) || e); }
+  }
+  if (atualDoc && valido(atualDoc.plano, atualDoc.periodo)) {
+    return { plano: atualDoc.plano, periodo: atualDoc.periodo, fonte: 'legado' };
+  }
+  return null;
+}
+
 /* Miolo do webhook, isolado do req/res de proposito: o reprocessador chama
    esta mesma funcao. Erro aqui SOBE — quem decide o que fazer com ele e quem
    chamou. */
@@ -587,6 +629,12 @@ async function processarEvento(evento, ctx) {
     const r = await tratarTransferencia(tipo, evento.transfer || {});
     return Object.assign({ ok: true, tratado: 'transferencia' }, r);
   }
+
+  /* 23/09/2026: o token de TRANSFERENCIA so fala de TRANSFER_*. Antes ele
+     passava pelos ramos de assinatura, ponto e pedido — quem tivesse esse
+     token cortava o plano de qualquer uid (os eventos de desligar nao sao
+     reconferidos no Asaas). */
+  if (escopo === 'transfer') return { ok: true, recusado: 'escopo', escopo };
 
   const pay = evento.payment || {};
   const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
@@ -645,7 +693,12 @@ async function processarEvento(evento, ctx) {
   let payReal = pay;
   if (LIGA.includes(tipo)) {
     const conf = await conferirPagamentoNaMae(pay.id);
-    if (!conf) return { ok: false, naoConfirmado: true, uid, tipo };
+    /* 23/09/2026: antes devolvia {ok:false} e o evento era gravado como 'ok'
+       — o reprocessador nunca tentava de novo. No Pix chega UM evento so: um
+       soluco do Asaas na hora da consulta e o cliente pagava sem o plano ligar.
+       Agora o erro SOBE: o evento fica 'erro', o Paulo e avisado no Telegram e
+       o cron de hora em hora tenta de novo. Continua falhando FECHADO. */
+    if (!conf) throw new Error('pagamento ' + String(pay.id || '?') + ' nao confirmado no Asaas (consulta falhou) — vai reprocessar');
     const st = String(conf.status || '').toUpperCase();
     if (st !== 'RECEIVED' && st !== 'CONFIRMED') {
       console.warn('webhook: evento de LIGA sem pagamento no Asaas', pay.id, st);
@@ -660,14 +713,63 @@ async function processarEvento(evento, ctx) {
 
   const ref = db.collection('assinaturas').doc(uid);
   const snap = await ref.get();
-  const periodo = (snap.exists && snap.data().periodo) || 'mensal';
-  const plano = (snap.exists && snap.data().plano) || 'pro';
+  const atualDoc = snap.exists ? (snap.data() || {}) : {};
+
+  /* 23/09/2026 — A ASSINATURA QUE FOI PAGA MANDA.
+     Antes o plano liberado era o de assinaturas/{uid} (o ULTIMO clique), e
+     qualquer aviso de qualquer assinatura do lojista ligava ou desligava tudo.
+     Agora:
+       - evento de DESLIGAR de uma assinatura que NAO e a atual (a abandonada,
+         ou a que o proprio robo cancelou ao gerar a nova) nao corta nada;
+       - evento de LIGAR libera o plano/periodo DAQUELA assinatura. */
+  const subPaga = String((payReal && payReal.subscription) || (pay && pay.subscription) || '');
+  let fat = {};
+  try {
+    const fs = await db.collection('faturamento').doc(uid).get();
+    fat = fs.exists ? (fs.data() || {}) : {};
+  } catch (_) { fat = {}; }
+  const subAtual = String(fat.asaasSubscriptionId || '');
+  const deOutraAssinatura = !!(subPaga && subAtual && subPaga !== subAtual);
+
+  if (!LIGA.includes(tipo) && deOutraAssinatura) {
+    // Estorno/chargeback de pagamento antigo ainda anula a comissao DELE,
+    // mas nao derruba o plano pago pela assinatura atual.
+    try {
+      if (tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') {
+        await estornarComissoes(String(pay.id || ''));
+      }
+    } catch (ce) { console.error('estorno comissao erro:', ce); }
+    return { ok: true, ignorado: 'assinatura_antiga', uid, tipo, sub: subPaga };
+  }
 
   if (LIGA.includes(tipo)) {
+    const pp = await planoDaAssinatura(uid, subPaga, fat, atualDoc, payReal);
+    if (!pp) {
+      throw new Error('pagamento ' + String(payReal.id || '?') + ' confirmado, mas nao consegui saber de qual plano (assinatura ' + (subPaga || '?') + ') — confira no Asaas');
+    }
+    const plano = pp.plano;
+    const periodo = pp.periodo;
+    if (deOutraAssinatura) {
+      await avisarDono(
+        '⚠️ Pagamento de assinatura ANTIGA\n\n' +
+        'Lojista (uid): ' + uid + '\n' +
+        'Assinatura paga: ' + subPaga + ' (' + plano + ' ' + periodo + ')\n' +
+        'Assinatura atual: ' + subAtual + '\n\n' +
+        'O plano foi liberado pelo que ele pagou. Confira no Asaas se a outra assinatura precisa ser cancelada, para nao cobrar em dobro.'
+      );
+    }
+
     const dias = (PLANOS[plano] && PLANOS[plano][periodo] && PLANOS[plano][periodo].dias) || 31;
-    const vence = new Date();
+    /* Quem paga DURANTE o teste gratis nao perde os dias que faltam: conta a
+       partir do fim do teste. Nos demais casos, a partir de hoje (como antes). */
+    let base = Date.now();
+    const venceAtualMs = (atualDoc.vence_em && typeof atualDoc.vence_em.toMillis === 'function') ? atualDoc.vence_em.toMillis() : 0;
+    if (atualDoc.periodo === 'trial' && atualDoc.ativo === true && venceAtualMs > base) base = venceAtualMs;
+    const vence = new Date(base);
     vence.setDate(vence.getDate() + dias + 3); // +3 dias de folga
     await ref.set({
+      plano,
+      periodo,
       ativo: true,
       vence_em: admin.firestore.Timestamp.fromDate(vence),
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),

@@ -1,3 +1,4 @@
+// versao 2026-09-23-verificado (e-mail confirmado conferido no Firebase Auth, nao so no token)
 // POST /api/ativar-trial      (repo: moviki-robo · pasta: api/)
 // Da 30 dias de Pro gratis pro lojista que acabou de se cadastrar.
 //
@@ -114,11 +115,29 @@ module.exports = async (req, res) => {
     // ---- TRAVA 1: e-mail confirmado ----
     // Login pelo Google ja chega verificado. Cadastro por e-mail/senha nao —
     // e e exatamente onde a conta descartavel nasce.
+    //
+    // 23/09/2026 (2026-09-23-verificado): o token do navegador vale 1 hora e
+    // carrega o `email_verified` do momento em que foi emitido. Quem acabou
+    // de clicar no link de confirmacao chegava aqui com o token velho
+    // ("nao confirmado") e ficava ate 1h no Basico, com o cardapio travado —
+    // justo na primeira visita vinda do anuncio de "30 dias gratis".
+    // Agora, se o token diz "nao confirmado", o robo pergunta ao proprio
+    // Firebase Auth (fonte da verdade). Continua falhando FECHADO: sem
+    // confirmacao no Auth, nao concede.
+    let emailConta = dec.email;
     if (dec.email_verified !== true) {
-      return res.status(200).json({ ok: true, pendenteVerificacao: true });
+      let verificadoNoAuth = false;
+      try {
+        const u = await admin.auth().getUser(uid);
+        verificadoNoAuth = !!(u && u.emailVerified === true);
+        if (u && u.email) emailConta = u.email;
+      } catch (_) { verificadoNoAuth = false; }
+      if (!verificadoNoAuth) {
+        return res.status(200).json({ ok: true, pendenteVerificacao: true });
+      }
     }
 
-    const emailNorm = normalizarEmail(dec.email);
+    const emailNorm = normalizarEmail(emailConta);
     if (!emailNorm) return res.status(200).json({ ok: true, negado: 'email_invalido' });
 
     // ---- TRAVA 3: dominio descartavel ----
