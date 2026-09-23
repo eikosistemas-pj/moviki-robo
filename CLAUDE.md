@@ -67,7 +67,8 @@ Este arquivo é lido pelo Claude Code no início de toda sessão. Ele vale para 
 - **Visitante** abre `moviki.com.br/{slug}` → `moviki /api/og` monta a página do negócio.
 - **Cliente manda mensagem no WhatsApp** → `moviki-ai /api/atendimento` (não sabe quem está falando, só conhece o catálogo). **Teto de 30 mensagens por telefone por dia** (`ATENDIMENTO_LIMITE_DIA` no Vercel). Ao estourar, manda uma vez o caminho humano e fica calado até a virada do dia (UTC).
 - **Lojista usa a caixa de mensagens do painel** → `moviki-ai /api/chat` (sabe quem está falando, lê os dados reais da conta).
-- **Rotinas de rede social** → `moviki-assistente-social` roda por Actions, lê a vitrine (`moviki.com.br/api/vitrine`) e o catálogo do material de apoio (`app.moviki.com.br/material/catalogo.json`) e publica.
+- **Rotinas de rede social** → `moviki-assistente-social` roda por Actions, lê a vitrine (`moviki.com.br/api/vitrine`), o catálogo do material de apoio (`app.moviki.com.br/material/catalogo.json`) e as peças liberadas dos criadores (`www.moviki.com.br/api/criadores`, GET) e publica.
+- **Criador** envia peça na **Área do criador** do `parceiro.html` (`criador_pecas` + arquivo em `criadores/{uid}/`) e autoriza → **dono** aprova no menu **Criadores** do `eikoadm01.html` → a peça aparece no `GET /api/criadores` → o robô social publica. O mesmo menu lê as visitas de cada criador no GA4 pelo `POST /api/criadores` (só admin). O criador vê as **próprias** visitas pelo `POST /api/criadores` com `acao: meu_trafego` — o slug sai do registro dele no servidor, nunca do pedido.
 
 ### Fronteiras que não se cruzam
 
@@ -87,7 +88,8 @@ Este arquivo é lido pelo Claude Code no início de toda sessão. Ele vale para 
 | Live pública | `moviki.com.br/live/{slug}` e `moviki.com.br/aovivo` |
 | Robô de cobrança | `moviki-robo.vercel.app` (sem tela) |
 
-- Rotas públicas do site: `/p/{slug}`, `/pp/{slug}`, `/v/{slug}`, `/live/{slug}`, `/aovivo`, `/sitemap-negocios.xml`.
+- Rotas públicas do site: `/p/{slug}`, `/pp/{slug}`, `/c/{slug}` (criador), `/v/{slug}`, `/live/{slug}`, `/aovivo`, `/sitemap-negocios.xml`.
+- APIs do site: `/api/og`, `/api/vitrine`, `/api/live`, `/api/sitemap`, `/api/criadores` (22/09/2026).
 - DNS e e-mail (Titan) na **HostGator**.
 
 ## 7. Onde ficam os dados (Firestore)
@@ -110,6 +112,9 @@ As **regras do Firestore e do Storage** ficam versionadas em `moviki-app/firebas
 | `admins`, `configuracoes`, `sistema` | Controle interno | Admin SDK |
 | `checkout_contas`, `faturamento`, `recebimento` | Cobrança e recebimento | **Só** `moviki-robo` |
 | `moderacao`, `liveTermos` | Moderação e aceite de termos da live | Admin SDK |
+| `criador_pecas` | Peças dos influenciadores para as redes do Moviki (regras v27, 22/09/2026) | Criador cria e autoriza/revoga; **só o dono** aprova/recusa/suspende |
+
+- `parceiros/{uid}.criador == true` marca quem é criador (o dono marca no menu Criadores); só com ela o menu **Área do criador** aparece no painel do parceiro. `parceiros/{uid}.criadorCustoMes` = custo fixo mensal opcional, usado só no cálculo "vale a pena".
 
 ## 8. Serviços externos
 
@@ -141,7 +146,7 @@ Regras da publicação:
 - Instagram é prioridade; Facebook é best-effort e nunca derruba o ciclo.
 - Imagem não é gerada por IA na hora de publicar. **Desde 22/09/2026 feed, story e reel usam o banco do Material de apoio do parceiro**: `tipo: feed` → feed, `tipo: story` → story, `tipo: video` 9:16 de 3 a 90 s → reel. A peça vai ao ar como está, com a legenda convertida para a voz da marca (sai `#publi`, `{link}` vira link da bio). Peça com "link deste parceiro" impresso ou falado fica fora (`MATERIAL_EXCLUIR` no robô).
 - **Reel e story também saem na Página do Facebook** (antes, com `SO_FACEBOOK` ligado, o reel não publicava nada desde 24/08).
-- **Brecha dos criadores:** peça de influenciador entra em feed, story e reel quando ele **autoriza** no painel **e** o Moviki **aprova** — as duas chaves, sempre. Fonte desligada até existir o secret `CRIADORES_URL` (endpoint no site, conta só leitura). Crédito "Conteúdo de @arroba" obrigatório; até metade dos posts de cada formato. Contrato em `moviki-assistente-social/conteudo/CRIADORES-CONTRATO.md`.
+- **Brecha dos criadores:** peça de influenciador entra em feed, story e reel quando ele **autoriza** no painel **e** o Moviki **aprova** — as duas chaves, sempre. Fonte desligada até existir o secret `CRIADORES_URL` = `https://www.moviki.com.br/api/criadores` (endpoint pronto em 22/09, conta só leitura). Crédito "Conteúdo de @arroba" obrigatório; até metade dos posts de cada formato. Vídeo de criador: reel 3 a 90 s, **story 3 a 60 s**; autorização vale 12 meses (termo 3.1). Contrato em `moviki-assistente-social/conteudo/CRIADORES-CONTRATO.md`.
 - Calendário do feed: sexta = card de pauta de parceiro; o resto = peça do material. Material fora do ar → card de pauta, o calendário não fura.
 - **Vitrine de lojista DESLIGADA** (`VITRINE_POR_SEMANA` = 0) enquanto a base real for zero: os negócios com opt-in são contas de teste, e publicá-los é prova social falsa. No primeiro lojista real, criar o secret `VITRINE_POR_SEMANA=1` (1 post por semana).
 - Vitrine e card de pauta saem na **moldura padrão Moviki** (marinho, mapa neon, botão verde). A cor do lojista não entra; o banco `assets/fundos` foi aposentado. Conta demo e slug derivado de e-mail nunca entram na vitrine.
@@ -325,3 +330,5 @@ Como o time funciona:
 - 17/09/2026: mapa divergiu pela **terceira vez** — a linha das videoaulas existia só na cópia do `moviki-app`. Corrigido, e a conferência das seis cópias deixou de ser disciplina de quem edita: virou a primeira tarefa do Gabinete em toda sessão. Regra sem dono é regra que volta a quebrar.
 - 17/09/2026: **equipe de especialistas criada** — oito cadeiras, cada uma dona de uma parte da empresa, gravadas dentro dos repositórios. Antes, toda sessão começava sem saber as regras da área que ia mexer, e o Paulo era o único ponto de memória do negócio. O time nasceu completo por decisão dele, contra a recomendação de começar com três: fica valendo a revisão aos 60 dias para a cadeira que não tiver uso.
 - 22/09/2026: **feed padronizado sobre o Material de apoio.** Os posts saíam cada um de um jeito: fundo de foto sem relação com o negócio, etiqueta na cor do lojista, frase escrita por cima do rosto da pessoa. Além disso foram ao ar o e-mail de um lojista como link (slug derivado de e-mail), a conta demo como se fosse negócio real, UF errada ("Curitiba - PA") e "TÁ ABERTO AGORA" sem o robô saber se estava aberto. Agora o feed publica as peças do material, a vitrine tem moldura única e teto semanal — **desligada até o primeiro lojista real**, porque os negócios com opt-in eram todos contas de teste — e esses quatro erros estão barrados com teste. No mesmo dia: story diário, reel também na Página do Facebook (estava parado desde 24/08 por um "exclusivo do Instagram" que não era verdade) e a brecha para peças de criadores com duas chaves — autorização dele e aprovação do Moviki.
+- 22/09/2026: **menu Criadores no painel do dono** — fila de aprovação (a segunda chave: o criador autoriza, o dono aprova, suspende ou recusa com motivo) e desempenho por criador: visitas pelos links /c/ e /p/ (GA4), cadastros, pagantes, receita líquida estimada (mensalidade − 6% − R$ 2), custo (comissões, bônus e custo fixo opcional), resultado e posts nas nossas redes. Coleção `criador_pecas` com regras v27 e pasta `criadores/{uid}/` no Storage. Endpoint `/api/criadores` no site: GET para o robô (só peça com as duas chaves, de criador aprovado e marcado), POST de tráfego só para admin. Motivo: decidir com número, criador por criador, se a parceria se paga.
+- 22/09/2026: **Área do criador no painel do parceiro** — o influenciador marcado envia a peça (feed, story ou reel) com a mesma checagem do robô antes de subir (proporção, resolução, duração, peso, termos proibidos na legenda), marca ou revoga a autorização para as redes do Moviki, apaga peça e arquivo, e vê os próprios resultados: visitas por dia e por canal (`?canal=`), cadastros, pagantes, comissões e posts nas nossas redes. Motivo: o criador sabe o que aconteceu com cada peça sem pedir ao dono, e a peça já chega no formato que o robô publica.
