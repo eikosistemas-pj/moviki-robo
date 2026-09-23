@@ -1,6 +1,16 @@
 {
   "crons": [
-    { "path": "/api/lembrete-trial", "schedule": "0 12 * * *" },
-    { "path": "/api/webhook-reprocessa", "schedule": "20 * * * *" }
+    {
+      "path": "/api/lembrete-trial",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/webhook-reprocessa",
+      "schedule": "20 * * * *"
+    },
+    {
+      "path": "/api/pedidos-confere",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }
