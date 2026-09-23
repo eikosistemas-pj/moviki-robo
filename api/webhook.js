@@ -1,4 +1,4 @@
-// versao 2026-09-23-assinatura (plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
+// versao 2026-09-23-rodada2 (testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
@@ -197,7 +197,10 @@ async function resolverParceiro(slug) {
     const puid = s.data().uid;
     const p = await db.collection('parceiros').doc(puid).get();
     if (!p.exists) return null;
-    return { uid: puid, data: p.data() };
+    // criadoMs = hora em que o SERVIDOR criou o cadastro (createTime do
+    // Firestore) — nao e o criadoEm gravado pelo navegador, que da para forjar.
+    const criadoMs = (p.createTime && typeof p.createTime.toMillis === 'function') ? p.createTime.toMillis() : 0;
+    return { uid: puid, data: p.data(), criadoMs };
   } catch (e) { return null; }
 }
 
@@ -283,6 +286,16 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
 
   // Nível 1 (recorrente)
   const p1 = await resolverParceiro(slug1);
+  /* INDICACAO ANTERIOR AO PARCEIRO — 23/09/2026. A indicacao guarda so o
+     apelido. Se ela foi gravada ANTES de o parceiro dono desse apelido existir
+     (link com apelido que nao existia, ou apelido reaproveitado), quem
+     registrou o apelido depois nao trouxe esse lojista — e herdaria 15% dele
+     para sempre. Compara a hora do SERVIDOR dos dois documentos. */
+  const indMs = (ind.createTime && typeof ind.createTime.toMillis === 'function') ? ind.createTime.toMillis() : 0;
+  if (p1 && indMs && p1.criadoMs && p1.criadoMs > indMs) {
+    console.warn('comissao: indicacao anterior ao parceiro, ignorada', lojistaUid, slug1);
+    return;
+  }
   /* AUTO-INDICACAO — 15/09/2026. A trava existia na cadeia de parceiros (a
      regra do Firestore recusa create de parceiro com indicadoPor == slug
      proprio) e NAO existia aqui. Sem ela, o parceiro aprovado abria a propria
@@ -310,13 +323,16 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   // Níveis 2 e 3 (bônus único, só no 1º pagamento)
   if (primeiro) {
     const slug2 = p1 ? (p1.data.indicadoPor || '') : '';
-    const p2 = slug2 ? await resolverParceiro(slug2) : null;
+    let p2 = slug2 ? await resolverParceiro(slug2) : null;
+    // Mesmo principio: o "de cima" tem que existir antes de quem ele indicou.
+    if (p2 && p1 && p1.criadoMs && p2.criadoMs && p2.criadoMs > p1.criadoMs) p2 = null;
     if (p2 && p2.uid !== lojistaUid && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
       await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia });
       creditados.add(p2.uid);
     }
     const slug3 = p2 ? (p2.data.indicadoPor || '') : '';
-    const p3 = slug3 ? await resolverParceiro(slug3) : null;
+    let p3 = slug3 ? await resolverParceiro(slug3) : null;
+    if (p3 && p2 && p2.criadoMs && p3.criadoMs && p3.criadoMs > p2.criadoMs) p3 = null;
     if (p3 && p3.uid !== lojistaUid && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
       await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia });
       creditados.add(p3.uid);
@@ -764,16 +780,24 @@ async function processarEvento(evento, ctx) {
        partir do fim do teste. Nos demais casos, a partir de hoje (como antes). */
     let base = Date.now();
     const venceAtualMs = (atualDoc.vence_em && typeof atualDoc.vence_em.toMillis === 'function') ? atualDoc.vence_em.toMillis() : 0;
-    if (atualDoc.periodo === 'trial' && atualDoc.ativo === true && venceAtualMs > base) base = venceAtualMs;
+    /* testeAte — 23/09/2026: o teste gratis da MAIS que o Pro (fotos e video
+       na pagina publica, live no nivel Premium). Quem pagava o Pro no meio do
+       teste perdia isso na hora. O fim do teste fica guardado e as paginas
+       (404, og, live) tratam como teste ate essa data. */
+    let testeAte = null;
+    const pagandoNoTeste = atualDoc.periodo === 'trial' && atualDoc.ativo === true && venceAtualMs > base;
+    if (pagandoNoTeste) { base = venceAtualMs; testeAte = admin.firestore.Timestamp.fromMillis(venceAtualMs); }
     const vence = new Date(base);
     vence.setDate(vence.getDate() + dias + 3); // +3 dias de folga
-    await ref.set({
+    const novoDoc = {
       plano,
       periodo,
       ativo: true,
       vence_em: admin.firestore.Timestamp.fromDate(vence),
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    };
+    if (testeAte) novoDoc.testeAte = testeAte;
+    await ref.set(novoDoc, { merge: true });
 
     // Comissao do Programa de Parceiros. Roda depois da ativacao e NUNCA a
     // derruba: se der erro no calculo, o plano do lojista ja ficou ativo.

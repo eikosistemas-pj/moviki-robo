@@ -1,4 +1,4 @@
-// versao 2026-09-23-assinatura (teste gratis pode assinar; sem assinatura duplicada no Asaas)
+// versao 2026-09-23-trava (teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
 // POST /api/criar-assinatura
 // Chamado pelo painel quando o lojista escolhe um plano.
 // Cria (ou reaproveita) o cliente no Asaas, cria a assinatura recorrente e
@@ -106,6 +106,24 @@ module.exports = async (req, res) => {
     if (vigente && !emTeste) {
       return res.status(409).json({ erro: 'Voce ja tem um plano ativo — ele renova sozinho. Para trocar de plano, fale com a gente.', motivo: 'ja_ativo' });
     }
+
+    /* TRAVA DE CLIQUE DUPLO — 23/09/2026. Duas chamadas ao mesmo tempo (duas
+       abas, o banner e o modal) liam a mesma "assinatura anterior" e criavam
+       DUAS assinaturas novas; a que sobrava ficava viva cobrando todo mes.
+       Agora so uma geracao por lojista por vez: a segunda recebe 429 e a tela
+       pede para aguardar. A trava expira sozinha em 60 s se a funcao morrer. */
+    const travaRef = db.collection('faturamento').doc(uid);
+    const pegouTrava = await db.runTransaction(async (t) => {
+      const ts = await t.get(travaRef);
+      const ate = ts.exists ? Number((ts.data() || {}).gerandoAssinaturaAte || 0) : 0;
+      if (ate > Date.now()) return false;
+      t.set(travaRef, { gerandoAssinaturaAte: Date.now() + 60000 }, { merge: true });
+      return true;
+    });
+    if (!pegouTrava) {
+      return res.status(429).json({ erro: 'Ja estamos gerando o seu pagamento. Aguarde alguns segundos e tente de novo.', motivo: 'em_andamento' });
+    }
+    try {
 
     const nomeSeguro = nome ? String(nome).slice(0, 120) : undefined;
     const cfg = PLANOS[plano][periodo];
@@ -220,6 +238,9 @@ module.exports = async (req, res) => {
     }
 
     return res.status(200).json({ ok: true, invoiceUrl, subscriptionId: assin.id, primeiraCobranca, emTeste: !!emTeste });
+    } finally {
+      try { await travaRef.set({ gerandoAssinaturaAte: 0 }, { merge: true }); } catch (_) {}
+    }
   } catch (e) {
     console.error('criar-assinatura erro:', e);
     // Erros de validacao vindos do Asaas (4xx) sao seguros de mostrar ("CPF invalido" etc).

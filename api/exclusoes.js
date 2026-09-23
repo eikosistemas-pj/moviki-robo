@@ -1,4 +1,5 @@
-// api/exclusoes.js | versao 2026-09-16-exclusao2  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-09-23-exclusao3  (repo: moviki-robo)
+// 2026-09-23: cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
 // Painel do dono -> Exclusoes. Dois modos (campo "action"):
 //   - "listar":  devolve os pedidos de exclusao pendentes (status 'solicitado').
 //   - "excluir": APAGA DE VERDADE a conta do uid informado — cancela a assinatura
@@ -232,21 +233,31 @@ module.exports = async (req, res) => {
          1) ASSINATURA — FALHA FECHADA. Nada e apagado antes disto.
          ========================================================== */
       let subId = null;
+      /* 23/09/2026: alem da assinatura ATUAL, cancela TODAS as que o
+         criar-assinatura registrou em assinaturasAsaas e que nao constam como
+         canceladas — uma sobra viva continuaria cobrando o ex-cliente todo mes
+         depois de a conta sumir. */
+      let subIds = [];
       try {
         const fat = await db.collection('faturamento').doc(uid).get();
-        subId = fat.exists ? ((fat.data() || {}).asaasSubscriptionId || null) : null;
+        const fd = fat.exists ? (fat.data() || {}) : {};
+        subId = fd.asaasSubscriptionId || null;
+        const canceladas = Array.isArray(fd.assinaturasCanceladas) ? fd.assinaturasCanceladas.map(String) : [];
+        const todas = [subId].concat(Object.keys(fd.assinaturasAsaas || {}));
+        subIds = Array.from(new Set(todas.filter(Boolean).map(String)))
+          .filter((id) => id === String(subId) || canceladas.indexOf(id) < 0);
       } catch (e) {
         res.status(502).json({ ok: false, erro: 'faturamento_ilegivel',
           mensagem: 'Nao consegui ler o faturamento desta conta para conferir a assinatura. ' +
                     'NADA foi apagado. Tente de novo em instantes.' });
         return;
       }
-      if (subId) {
-        const r = await cancelarAssinatura(String(subId));
+      for (const sid of subIds) {
+        const r = await cancelarAssinatura(String(sid));
         if (!r.ok) {
           res.status(409).json({ ok: false, erro: 'assinatura_viva',
-            asaasSubscriptionId: String(subId),
-            mensagem: 'A assinatura ' + subId + ' NAO foi cancelada no Asaas (' + r.erro + '). ' +
+            asaasSubscriptionId: String(sid),
+            mensagem: 'A assinatura ' + sid + ' NAO foi cancelada no Asaas (' + r.erro + '). ' +
                       'Nenhum dado foi apagado — se eu apagasse agora, a cobranca continuaria e o ' +
                       'id da assinatura sumiria junto com a conta. Cancele no painel do Asaas e ' +
                       'clique em excluir de novo.' });
@@ -353,7 +364,17 @@ module.exports = async (req, res) => {
           resumo.parceiro = true;
           const slug = (parc.data() || {}).slug;
           if (slug) {
-            await db.collection('parceiro_slugs').doc(String(slug)).delete().catch(() => {});
+            /* 23/09/2026: o apelido NAO volta a ficar livre. Antes ele era
+               apagado, e quem registrasse o mesmo apelido herdava a carteira:
+               os lojistas indicados guardam so o apelido (indicacoes/{uid}.ref)
+               e os parceiros de baixo guardam indicadoPor. O novo dono passava
+               a receber 15% deles e os bonus de 2o/3o nivel eram pagos de novo.
+               Fica uma lapide SEM uid: ninguem consegue criar (o documento
+               existe) e o webhook nao acha dono (sem uid = sem comissao). */
+            await db.collection('parceiro_slugs').doc(String(slug)).set({
+              excluido: true,
+              excluidoEm: admin.firestore.FieldValue.serverTimestamp(),
+            }).catch(() => {});
             await db.collection('parceiros_publicos').doc(String(slug)).delete()
               .then(() => { resumo.espelhoParceiro = true; })
               .catch(() => {});

@@ -1,3 +1,4 @@
+// versao 2026-09-23-espelho (acao 'espelho': suspensao/recusa derruba o cracha publico)
 // api/parceiro-aprovado.js  (repo: moviki-robo)
 // Envia o e-mail de BOAS-VINDAS quando o dono aprova um parceiro manualmente,
 // ou quando reenvia pelo botão "Reenviar boas-vindas" no painel do dono.
@@ -44,6 +45,24 @@ module.exports = async (req, res) => {
     const parceiroSnap = await parceiroRef.get();
     if (!parceiroSnap.exists) { res.status(404).json({ ok: false, erro: 'parceiro nao encontrado' }); return; }
     const p = parceiroSnap.data();
+
+    // 2b) 23/09/2026 — ACAO 'espelho': o dono mudou o status (suspendeu,
+    // recusou ou reativou) e o espelho publico /v/{apelido} precisa seguir.
+    // Antes o espelho so era regravado na APROVACAO: parceiro suspenso por
+    // golpe continuava "Parceiro autorizado" no QR do cracha impresso.
+    // Nao aprovado + espelho existente -> regrava com ativo:false.
+    // Nao aprovado + sem espelho -> nao cria (nao expoe nome de recusado).
+    if (body.acao === 'espelho') {
+      const slug = String(p.slug || '').trim();
+      if (!slug) { res.status(200).json({ ok: false, motivo: 'sem_slug' }); return; }
+      if (p.status !== 'aprovado') {
+        const pub = await db.collection('parceiros_publicos').doc(slug).get();
+        if (!pub.exists) { res.status(200).json({ ok: true, espelho: 'inexistente' }); return; }
+      }
+      const r = await gravarEspelho(admin, db, p);
+      res.status(200).json({ ok: r.ok === true, espelho: p.status === 'aprovado' ? 'ativo' : 'desativado' });
+      return;
+    }
 
     // 3) Guarda: só manda pra quem está APROVADO.
     if (p.status !== 'aprovado') { res.status(409).json({ ok: false, erro: 'parceiro nao aprovado' }); return; }
