@@ -1,4 +1,5 @@
-// versao 2026-09-23-verificado (e-mail confirmado conferido no Firebase Auth, nao so no token)
+// versao 2026-09-25-pendente (clicar em Assinar antes de confirmar o e-mail nao queima mais o teste)
+// anterior: 2026-09-23-verificado (e-mail confirmado conferido no Firebase Auth, nao so no token)
 // POST /api/ativar-trial      (repo: moviki-robo · pasta: api/)
 // Da 30 dias de Pro gratis pro lojista que acabou de se cadastrar.
 //
@@ -79,6 +80,14 @@ function normalizarEmail(email) {
   return local + '@' + dominio;
 }
 
+/* Documento de assinaturas/{uid} que conta como "ja teve plano ou teste".
+   A pendencia do criar-assinatura (clicou em Assinar e nao pagou) nao conta. */
+function jaTemRegistro(snap) {
+  if (!snap || !snap.exists) return false;
+  const d = snap.data() || {};
+  return !!(d.vence_em || d.origem || d.ativo === true || d.testeAte);
+}
+
 function hashEmail(emailNorm) {
   const sal = process.env.TRIAL_HASH_SAL || 'moviki-trial-v1';
   return crypto.createHash('sha256').update(sal + '|' + emailNorm).digest('hex');
@@ -109,8 +118,15 @@ module.exports = async (req, res) => {
 
     // Ja tem assinatura (trial antigo, plano pago, ou qualquer registro):
     // responde igual a versao antiga e nao mexe em nada.
+    //
+    // 25/09/2026: EXCETO a "pendencia" que o criar-assinatura grava quando a
+    // pessoa clica em Assinar sem nunca ter tido plano ({plano, periodo,
+    // ativo:false}, sem vence_em). Quem vinha do anuncio, cadastrava e clicava
+    // em Assinar so para ver o preco ANTES de confirmar o e-mail perdia os 30
+    // dias para sempre. Registro com vence_em (teste ja dado ou plano ja pago),
+    // com origem, ou ativo continua contando como "ja existe".
     const snap = await ref.get();
-    if (snap.exists) return res.status(200).json({ ok: true, jaExiste: true });
+    if (jaTemRegistro(snap)) return res.status(200).json({ ok: true, jaExiste: true });
 
     // ---- TRAVA 1: e-mail confirmado ----
     // Login pelo Google ja chega verificado. Cadastro por e-mail/senha nao —
@@ -161,7 +177,7 @@ module.exports = async (req, res) => {
     // conseguem conceder dois trials para o mesmo hash.
     const saida = await db.runTransaction(async (t) => {
       const [a, u] = await Promise.all([t.get(ref), t.get(refUso)]);
-      if (a.exists) return { jaExiste: true };
+      if (jaTemRegistro(a)) return { jaExiste: true };
 
       if (u.exists) {
         const antes = u.data() || {};

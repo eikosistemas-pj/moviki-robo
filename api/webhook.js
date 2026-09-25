@@ -1,4 +1,5 @@
-// versao 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
+// versao 2026-09-25-vencimento (vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
+// anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
 // O Asaas chama isso sozinho toda vez que um pagamento muda de status.
@@ -789,6 +790,16 @@ async function processarEvento(evento, ctx) {
   }
 
   if (LIGA.includes(tipo)) {
+    /* 25/09/2026 — O MESMO PAGAMENTO SO LIGA O PLANO UMA VEZ.
+       No cartao o Asaas manda CONFIRMED no dia do pagamento e RECEIVED ~30
+       dias depois, com ids de EVENTO diferentes (a trava do evento nao pega).
+       O 2o aviso empurrava o vencimento de novo e podia religar um plano ja
+       derrubado pela mensalidade seguinte nao paga: um mes de graca.
+       Agora o id do pagamento que ja ligou fica em faturamento.pagosLigados. */
+    const payIdLiga = String((payReal && payReal.id) || '');
+    if (payIdLiga && fat.pagosLigados && fat.pagosLigados[payIdLiga]) {
+      return { ok: true, ignorado: 'pagamento_ja_ligou', uid, tipo, pagamento: payIdLiga };
+    }
     const pp = await planoDaAssinatura(uid, subPaga, fat, atualDoc, payReal);
     if (!pp) {
       throw new Error('pagamento ' + String(payReal.id || '?') + ' confirmado, mas nao consegui saber de qual plano (assinatura ' + (subPaga || '?') + ') — confira no Asaas');
@@ -816,9 +827,16 @@ async function processarEvento(evento, ctx) {
     }
 
     const dias = (PLANOS[plano] && PLANOS[plano][periodo] && PLANOS[plano][periodo].dias) || 31;
-    /* Quem paga DURANTE o teste gratis nao perde os dias que faltam: conta a
-       partir do fim do teste. Nos demais casos, a partir de hoje (como antes). */
-    let base = Date.now();
+    /* 25/09/2026 — O PERIODO PAGO COMECA NO VENCIMENTO DA COBRANCA.
+       Antes contava da hora do aviso: quem pagava a renovacao 8 dias antes
+       ficava sem plano nos ultimos 8 dias do ciclo (e o anual pago com
+       antecedencia perdia semanas). O ciclo do Asaas e fixo no dueDate, entao
+       o plano vale de dueDate ate dueDate + periodo (+3 de folga), pago antes
+       ou depois. Sem dueDate valido, cai no comportamento antigo (hoje).
+       Quem paga DURANTE o teste gratis nao perde os dias que faltam: conta a
+       partir do fim do teste. */
+    const dueMs = Date.parse(String((payReal && payReal.dueDate) || '') + 'T12:00:00-03:00');
+    let base = Number.isFinite(dueMs) ? dueMs : Date.now();
     const venceAtualMs = (atualDoc.vence_em && typeof atualDoc.vence_em.toMillis === 'function') ? atualDoc.vence_em.toMillis() : 0;
     /* testeAte — 23/09/2026: o teste gratis da MAIS que o Pro (fotos e video
        na pagina publica, live no nivel Premium). Quem pagava o Pro no meio do
@@ -826,9 +844,13 @@ async function processarEvento(evento, ctx) {
        (404, og, live) tratam como teste ate essa data. */
     let testeAte = null;
     const pagandoNoTeste = atualDoc.periodo === 'trial' && atualDoc.ativo === true && venceAtualMs > base;
-    if (pagandoNoTeste) { base = venceAtualMs; testeAte = admin.firestore.Timestamp.fromMillis(venceAtualMs); }
+    if (pagandoNoTeste) { base = Math.max(base, venceAtualMs); testeAte = admin.firestore.Timestamp.fromMillis(venceAtualMs); }
     const vence = new Date(base);
     vence.setDate(vence.getDate() + dias + 3); // +3 dias de folga
+    /* Nunca encurta um plano pago que ja esta valendo (mesmo plano e periodo). */
+    if (atualDoc.ativo === true && atualDoc.plano === plano && atualDoc.periodo === periodo && venceAtualMs > vence.getTime()) {
+      vence.setTime(venceAtualMs);
+    }
     const novoDoc = {
       plano,
       periodo,
@@ -838,6 +860,10 @@ async function processarEvento(evento, ctx) {
     };
     if (testeAte) novoDoc.testeAte = testeAte;
     await ref.set(novoDoc, { merge: true });
+    if (payIdLiga) {
+      await db.collection('faturamento').doc(uid).set({ pagosLigados: { [payIdLiga]: admin.firestore.FieldValue.serverTimestamp() } }, { merge: true })
+        .catch((e) => console.error('pagosLigados (ignorado):', e && e.message));
+    }
 
     // Comissao do Programa de Parceiros. Roda depois da ativacao e NUNCA a
     // derruba: se der erro no calculo, o plano do lojista ja ficou ativo.
@@ -848,6 +874,15 @@ async function processarEvento(evento, ctx) {
     try { await registrarPurchase(uid, plano, periodo, payReal); }
     catch (ge) { console.error('purchase medicao erro:', ge); }
   } else {
+    /* 25/09/2026: cobranca VENCIDA ou REMOVIDA nao corta o teste gratis.
+       Durante o teste nenhum pagamento foi aplicado (quem paga no teste sai do
+       periodo 'trial'), entao um aviso desses so pode ser de cobranca que ele
+       gerou e nao pagou — por exemplo, clicou em Assinar antes de confirmar o
+       e-mail e o teste entrou depois. O teste segue ate o fim. */
+    if ((tipo === 'PAYMENT_OVERDUE' || tipo === 'PAYMENT_DELETED')
+        && atualDoc.periodo === 'trial' && atualDoc.ativo === true) {
+      return { ok: true, ignorado: 'teste_gratis_segue', uid, tipo };
+    }
     /* 23/09/2026 (rodada 3): quem pagou DURANTE o teste gratis e pede
        reembolso (ou tem o pagamento estornado) volta para o TESTE ate o fim
        dele — antes caia direto no Basico e perdia os dias de teste que ainda
