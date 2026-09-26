@@ -1,4 +1,4 @@
-// versao 2026-09-25-vencimento (vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
+// versao 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
 // anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
@@ -874,6 +874,15 @@ async function processarEvento(evento, ctx) {
     try { await registrarPurchase(uid, plano, periodo, payReal); }
     catch (ge) { console.error('purchase medicao erro:', ge); }
   } else {
+    /* 25/09/2026 (A2): cobranca REMOVIDA nunca desliga. Cobranca removida e
+       cobranca que nao foi paga: quem manda no fim do plano e o vence_em do
+       ultimo pagamento. Antes, cancelar a assinatura no Asaas (pedido de
+       cancelamento do lojista) removia a cobranca pendente e o robo cortava o
+       plano NA HORA — contra os Termos (clausula 5) e o aviso do Meu Plano:
+       "o plano segue ate o fim do periodo ja pago". */
+    if (tipo === 'PAYMENT_DELETED') {
+      return { ok: true, ignorado: 'cobranca_removida_plano_segue', uid, tipo };
+    }
     /* 25/09/2026: cobranca VENCIDA ou REMOVIDA nao corta o teste gratis.
        Durante o teste nenhum pagamento foi aplicado (quem paga no teste sai do
        periodo 'trial'), entao um aviso desses so pode ser de cobranca que ele

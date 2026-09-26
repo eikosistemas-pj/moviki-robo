@@ -135,11 +135,11 @@ function montarEmail(tipo, nome, dias) {
   } else if (tipo === 'd2') {
     subject = 'Faltam poucos dias no seu teste do Moviki';
     titulo  = 'Faltam só ' + dias + (dias === 1 ? ' dia' : ' dias') + ' de teste';
-    chamada = 'Seu teste grátis está acabando. Assine agora pra não perder seu espaço no mapa nem o que você já montou.';
+    chamada = 'Seu teste grátis está acabando. Assine agora pra continuar com cardápio, promoções, fotos e Modo Live. Se não assinar, sua conta volta ao plano Básico: o link e o pino no mapa continuam no ar e nada do que você montou é apagado.';
   } else if (tipo === 'd7') {
     subject = 'Seu teste do Moviki está terminando';
     titulo  = 'Seu teste grátis está terminando';
-    chamada = 'Faltam poucos dias pro seu teste acabar. Que tal garantir seu lugar no mapa e continuar aparecendo pros clientes?';
+    chamada = 'Faltam poucos dias pro seu teste acabar. Assinando durante o teste, a 1ª cobrança só vence no último dia dele e você não perde nenhum dia.';
   } else { // pago
     subject = 'Sua assinatura do Moviki está pra vencer';
     titulo  = 'Sua mensalidade vence em ' + dias + (dias === 1 ? ' dia' : ' dias');
@@ -152,7 +152,7 @@ function montarEmail(tipo, nome, dias) {
     'Sem interrupção: pague a cobrança e nada muda pros seus clientes',
   ] : [
     'Seu <b>cardápio</b>, <b>promoções</b> e <b>eventos</b> seguem no ar',
-    'Você continua aparecendo no <b>mapa</b> pros clientes te acharem',
+    'No <b>Premium</b>, o <b>Modo Live</b> continua liberado e o cardápio vende com Pix na sua conta',
     'No <b>Premium</b>, sua <b>logo aparece no seu pino do mapa</b> — muito mais destaque',
   ];
 

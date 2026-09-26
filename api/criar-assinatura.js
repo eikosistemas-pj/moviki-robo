@@ -1,4 +1,4 @@
-// versao 2026-09-23-trava (teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
+// versao 2026-09-25-email (so assina com e-mail confirmado; teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
 // POST /api/criar-assinatura
 // Chamado pelo painel quando o lojista escolhe um plano.
 // Cria (ou reaproveita) o cliente no Asaas, cria a assinatura recorrente e
@@ -70,6 +70,23 @@ module.exports = async (req, res) => {
     const decoded = await admin.auth().verifyIdToken(idToken);
     const uid = decoded.uid;
     const email = decoded.email || (req.body && req.body.email) || undefined;
+
+    /* 25/09/2026 (A2): so assina quem ja confirmou o e-mail. Antes, quem
+       clicava em Assinar antes de confirmar ganhava uma cobranca vencendo HOJE
+       e, ao confirmar, o teste gratis entrava por cima: pagava a mensalidade e
+       o ciclo do Asaas nao acompanhava o teste (duas cobrancas em ~1 mes).
+       Confirmado o e-mail, o teste entra primeiro e a 1a cobranca vence no fim
+       dele. O token pode estar velho (confirmou em outra aba): confere no Auth. */
+    let emailOk = decoded.email_verified === true;
+    if (!emailOk) {
+      try { emailOk = !!(await admin.auth().getUser(uid)).emailVerified; } catch (_) {}
+    }
+    if (!emailOk) {
+      return res.status(403).json({
+        erro: 'Confirme o seu e-mail antes de assinar: toque no link que enviamos. Assim você ganha os 30 dias grátis e a 1ª cobrança só vence no fim do teste.',
+        motivo: 'email_nao_confirmado',
+      });
+    }
 
     // 2) Valida plano/periodo/CPF.
     const { plano, periodo, cpfCnpj, nome, gaClientId, gaSessionId } = req.body || {};
