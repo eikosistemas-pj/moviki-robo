@@ -1,4 +1,4 @@
-// versao 2026-09-23-rodada3 (varredura de pedidos + limpeza diaria de comprovantes de 90 dias)
+// versao 2026-09-26-retencao (varredura de pedidos + comprovantes de 90 dias + retencao dos dados do comprador)
 // GET /api/pedidos-confere  (cron a cada 5 minutos, protegido por CRON_SECRET)
 //
 // Confere no Asaas os pedidos da live e do cardapio que ainda estao
@@ -26,6 +26,9 @@ module.exports = async (req, res) => {
     if (agora.getUTCHours() === 6 && agora.getUTCMinutes() < 5) {
       try { r.comprovantes = await checkout.limparComprovantesAntigos(300); } catch (e) { r.comprovantesErro = (e && e.message) || 'falha'; }
     }
+    /* 26/09: retencao dos dados do comprador. Segura a si mesma em 1 vez por
+       hora (marca no Firestore), entao nao depende da frequencia deste cron. */
+    try { r.retencao = await checkout.varrerRetencao(100); } catch (e) { r.retencaoErro = (e && e.message) || 'falha'; }
     res.status(200).json(Object.assign({ ok: true }, r));
   } catch (e) {
     console.error('pedidos-confere erro:', e);
