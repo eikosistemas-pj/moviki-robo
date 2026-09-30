@@ -1,4 +1,4 @@
-// versao 2026-09-26-retencao (varredura de pedidos + comprovantes de 90 dias + retencao dos dados do comprador)
+// versao 2026-09-30-estoque (varredura de pedidos + comprovantes + retencao + reservas de estoque vencidas)
 // GET /api/pedidos-confere  (cron a cada 5 minutos, protegido por CRON_SECRET)
 //
 // Confere no Asaas os pedidos da live e do cardapio que ainda estao
@@ -29,6 +29,9 @@ module.exports = async (req, res) => {
     /* 26/09: retencao dos dados do comprador. Segura a si mesma em 1 vez por
        hora (marca no Firestore), entao nao depende da frequencia deste cron. */
     try { r.retencao = await checkout.varrerRetencao(100); } catch (e) { r.retencaoErro = (e && e.message) || 'falha'; }
+    /* 30/09/2026 (P53): reserva de estoque vencida devolve a peca; Pix
+       direto abandonado vira 'expirado'. */
+    try { r.reservas = await checkout.varrerReservas(150); } catch (e) { r.reservasErro = (e && e.message) || 'falha'; }
     res.status(200).json(Object.assign({ ok: true }, r));
   } catch (e) {
     console.error('pedidos-confere erro:', e);
