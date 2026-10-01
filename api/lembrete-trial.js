@@ -13,6 +13,7 @@
 // Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
 
 const { admin, db } = require('../lib/firebase');
+const { normalizarApelidos } = require('../lib/trocaApelido');
 
 const EMAIL_FROM = 'Moviki <suporte@moviki.com.br>';
 const PAINEL_URL = 'https://app.moviki.com.br';
@@ -35,6 +36,15 @@ module.exports = async (req, res) => {
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
     const enviarDeVerdade = viaCabecalho && String(q.dry || '') !== '1';
+
+    /* 01/10/2026: indicacao que chegou pelo link VELHO de um parceiro que trocou
+       de apelido passa para o apelido novo (lib/trocaApelido.js). Roda antes do
+       e-mail e nunca derruba os lembretes. Em ?dry=1 nao grava nada. */
+    let apelidos = { simulacao: true };
+    if (enviarDeVerdade) {
+      try { apelidos = await normalizarApelidos({ db }); }
+      catch (e) { console.error('normalizarApelidos erro:', e); apelidos = { erro: true }; }
+    }
 
     const API_KEY = process.env.RESEND_API_KEY;
     if (enviarDeVerdade && !API_KEY) { res.status(200).json({ ok: false, motivo: 'sem_RESEND_API_KEY' }); return; }
@@ -112,7 +122,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    res.status(200).json({ ok: true, ...resultado });
+    res.status(200).json({ ok: true, ...resultado, apelidos });
   } catch (e) {
     console.error('lembrete erro:', e);
     res.status(500).json({ ok: false, erro: 'erro interno' });

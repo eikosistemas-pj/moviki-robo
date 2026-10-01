@@ -1,3 +1,4 @@
+// versao 2026-10-01-apelido (acao 'trocar_apelido': o dono troca apelido e nome do parceiro)
 // versao 2026-09-23-espelho (acao 'espelho': suspensao/recusa derruba o cracha publico)
 // api/parceiro-aprovado.js  (repo: moviki-robo)
 // Envia o e-mail de BOAS-VINDAS quando o dono aprova um parceiro manualmente,
@@ -14,6 +15,7 @@
 const { admin, db } = require('../lib/firebase');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { gravarEspelho } = require('../lib/espelhoParceiro');
+const { trocarApelido } = require('../lib/trocaApelido');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
@@ -61,6 +63,23 @@ module.exports = async (req, res) => {
       }
       const r = await gravarEspelho(admin, db, p);
       res.status(200).json({ ok: r.ok === true, espelho: p.status === 'aprovado' ? 'ativo' : 'desativado' });
+      return;
+    }
+
+    // 2c) 01/10/2026 — ACAO 'trocar_apelido': o dono troca o apelido (e/ou o
+    // nome exibido) do parceiro. Toda a logica mora em lib/trocaApelido.js:
+    // reserva do novo, apelido velho apontando para o mesmo dono, indicacoes e
+    // parceiros de baixo migrados e espelho /v/ refeito.
+    if (body.acao === 'trocar_apelido') {
+      const r = await trocarApelido({
+        admin, db, uid,
+        novo: typeof body.novo === 'string' ? body.novo : '',
+        nome: typeof body.nome === 'string' ? body.nome : null,
+        porUid: decoded.uid,
+        gravarEspelho,
+      });
+      const http = r.ok ? 200 : (r.erro === 'ocupado' || r.erro === 'mudou_agora' ? 409 : 400);
+      res.status(http).json(r);
       return;
     }
 
