@@ -1,4 +1,5 @@
-// versao 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
+// versao 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)
+// anterior: 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
 // anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
 // POST /api/webhook
@@ -7,7 +8,7 @@
 // ou e cancelado — e o corte automatico do inadimplente.
 
 const { admin, db } = require('../lib/firebase');
-const { PLANOS } = require('../lib/asaas');
+const { PLANOS, FUNDADOR } = require('../lib/asaas');
 const crypto = require('crypto');
 const ga = require('../lib/ga');
 const meta = require('../lib/meta');
@@ -261,9 +262,30 @@ async function creditarComissao(o) {
       estornada: false,
       criadoEm: admin.firestore.FieldValue.serverTimestamp(),
       // A comissão só entra no "disponível para saque" depois desta data.
-      liberaEm: admin.firestore.Timestamp.fromMillis(Date.now() + DIAS_RETENCAO_COMISSAO * 86400000),
+      liberaEm: admin.firestore.Timestamp.fromMillis(o.liberaMs || (Date.now() + DIAS_RETENCAO_COMISSAO * 86400000)),
     });
   } catch (e) { /* já existe (reenvio do Asaas) -> ignora */ }
+}
+
+/* 01/10/2026 — QUANDO A COMISSAO PODE SER SACADA.
+   1) Lote Fundador: retencao de FUNDADOR.retencaoDias (30), o prazo da garantia
+      de devolucao integral. Com 7 dias, o parceiro sacava e a devolucao do dia
+      20 virava saldo negativo.
+   2) CARTAO: o Asaas confirma no dia da compra e o dinheiro so cai na data de
+      credito (cerca de 30 dias; no parcelado, uma parcela por mes). A comissao
+      liberava em 7 dias — saia dinheiro antes de ele entrar, e um chargeback
+      depois do saque virava prejuizo. Agora libera no dia seguinte ao credito
+      previsto daquele pagamento, se isso for depois da retencao. */
+function liberaComissaoMs(periodo, pay) {
+  const dia = 86400000;
+  const fundador = /^fundador/.test(String(periodo || ''));
+  let libera = Date.now() + (fundador ? FUNDADOR.retencaoDias : DIAS_RETENCAO_COMISSAO) * dia;
+  const tipo = String((pay && pay.billingType) || '').toUpperCase();
+  if (tipo === 'CREDIT_CARD') {
+    const cred = Date.parse(String((pay && (pay.creditDate || pay.estimatedCreditDate)) || '') + 'T12:00:00-03:00');
+    if (Number.isFinite(cred)) libera = Math.max(libera, cred + dia);
+  }
+  return libera;
 }
 
 // Calcula e grava as comissões de um pagamento confirmado.
@@ -288,6 +310,7 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
   const competencia = (quando ? new Date(quando) : new Date()).toISOString().slice(0, 7);
 
   const creditados = new Set(); // não paga o mesmo parceiro 2x no mesmo pagamento
+  const liberaMs = liberaComissaoMs(periodo, pay);
 
   // Nível 1 (recorrente)
   const p1 = await resolverParceiro(slug1);
@@ -319,7 +342,7 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
     const ativos = await contarAtivosDoMes(p1.uid, competencia, lojistaUid);
     const nv = nivelPorAtivos(ativos);
     const pct1 = nv ? nv.pct : PCT_N1_BASE;
-    await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: pct1, payId, competencia });
+    await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: pct1, payId, competencia, liberaMs });
     creditados.add(p1.uid);
     await creditarMarco(p1.uid, slug1, nv, competencia);
     await guardarNivel(p1.uid, nv, ativos);
@@ -332,14 +355,14 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
     // Mesmo principio: o "de cima" tem que existir antes de quem ele indicou.
     if (p2 && p1 && p1.criadoMs && p2.criadoMs && p2.criadoMs > p1.criadoMs) p2 = null;
     if (p2 && p2.uid !== lojistaUid && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
-      await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia });
+      await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia, liberaMs });
       creditados.add(p2.uid);
     }
     const slug3 = p2 ? (p2.data.indicadoPor || '') : '';
     let p3 = slug3 ? await resolverParceiro(slug3) : null;
     if (p3 && p2 && p2.criadoMs && p3.criadoMs && p3.criadoMs > p2.criadoMs) p3 = null;
     if (p3 && p3.uid !== lojistaUid && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
-      await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia });
+      await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia, liberaMs });
       creditados.add(p3.uid);
     }
   }
@@ -446,8 +469,10 @@ async function quitarComissoesDoSaque(saqueDoc) {
   const limiteMs = (saque.pedidoEm && typeof saque.pedidoEm.toMillis === 'function')
                      ? saque.pedidoEm.toMillis() : null;
   const cs = await db.collection('comissoes').where('parceiroUid', '==', saque.parceiroUid).get();
-  const bat = db.batch();
+  const alvo = [];
   let valor = 0, qtd = 0;
+  /* B11 aqui tambem: sem corte legivel, nada e quitado (falha fechada). */
+  if (!limiteMs) return { valor: 0, qtd: 0 };
   cs.forEach((d) => {
     const c = d.data();
     if (c.pago || c.estornada) return;
@@ -455,15 +480,21 @@ async function quitarComissoesDoSaque(saqueDoc) {
     if (limiteMs && cMs && cMs > limiteMs) return;
     const libMs = (c.liberaEm && typeof c.liberaEm.toMillis === 'function') ? c.liberaEm.toMillis() : null;
     if (limiteMs && libMs && libMs > limiteMs) return;
-    bat.update(d.ref, {
-      pago: true,
-      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-      saqueId: saqueDoc.id,
-    });
+    alvo.push(d);
     valor += Number(c.valor) || 0;
     qtd++;
   });
-  await bat.commit();
+  /* B13 aqui tambem (01/10/2026): lotes de 400, nunca um batch so (o Firestore
+     recusa batch acima de 500 operacoes). */
+  for (let i = 0; i < alvo.length; i += 400) {
+    const bat = db.batch();
+    alvo.slice(i, i + 400).forEach((d) => bat.update(d.ref, {
+      pago: true,
+      pagoEm: admin.firestore.FieldValue.serverTimestamp(),
+      saqueId: saqueDoc.id,
+    }));
+    await bat.commit();
+  }
   return { valor: Math.round(valor * 100) / 100, qtd };
 }
 
@@ -475,6 +506,20 @@ async function reabrirComissoesDoSaque(saqueId) {
   cs.forEach((d) => bat.update(d.ref, { pago: false, pagoEm: null, saqueId: null }));
   await bat.commit();
   return cs.size;
+}
+
+/* B14 (01/10/2026): o saque que terminou (Pix caiu ou foi recusado) solta a
+   trava do parceiro em saque_trava/{parceiroUid}. E o caminho do Pix que ficou
+   "em duvida" no pagar-saque.js: quem resolve e este aviso do Asaas. */
+async function soltarTravaDoSaque(parceiroUid, saqueId) {
+  if (!parceiroUid || !saqueId) return;
+  const ref = db.collection('saque_trava').doc(String(parceiroUid));
+  try {
+    await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (s.exists && (s.data() || {}).saqueId === saqueId) tx.delete(ref);
+    });
+  } catch (e) { console.error('webhook: nao soltei a trava do saque', parceiroUid, saqueId, (e && e.message) || e); }
 }
 
 async function tratarTransferencia(tipo, tr) {
@@ -492,6 +537,7 @@ async function tratarTransferencia(tipo, tr) {
         comprovanteUrl: recibo,
         confirmadoEm: admin.firestore.FieldValue.serverTimestamp(),
       });
+      if (saque.quitacaoPendente !== true) await soltarTravaDoSaque(saque.parceiroUid, doc.id);
       return { jaEstavaPago: true };
     }
     const r = await quitarComissoesDoSaque(doc);
@@ -508,6 +554,7 @@ async function tratarTransferencia(tipo, tr) {
       pagamentoEmCursoEm: null,
       confirmadoEm: admin.firestore.FieldValue.serverTimestamp(),
     });
+    await soltarTravaDoSaque(saque.parceiroUid, doc.id);
     return { quitado: r.qtd, valor: r.valor };
   }
 
@@ -522,6 +569,7 @@ async function tratarTransferencia(tipo, tr) {
       ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
       pagamentoEmCursoEm: null,
     });
+    await soltarTravaDoSaque(saque.parceiroUid, doc.id);
     return { falhou: true, reabertas: reabertas };
   }
 
@@ -625,6 +673,30 @@ async function promoverAssinaturaPaga(uid, subPaga, subAtual) {
       assinaturas/{uid}, se for um periodo pago valido.
    Sem resposta confiavel devolve null — quem chamou lanca erro (reprocessa e
    avisa), em vez de liberar um plano no chute. */
+/* 01/10/2026 — Lote Fundador: pagamento confirmado transforma a reserva da vaga
+   em venda (oferta_fundador/estado). Se a reserva tinha vencido e o lote lotou
+   nesse meio tempo, o pagamento VALE do mesmo jeito (quem pagou leva) e o Paulo
+   e avisado de que vendeu acima das vagas. */
+async function confirmarVagaFundador(uid, periodo) {
+  const ref = db.collection('oferta_fundador').doc('estado');
+  let acima = false;
+  try {
+    await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      const d = s.exists ? (s.data() || {}) : {};
+      const itens = d.itens || {};
+      const it = itens[uid] || {};
+      if (it.pago === true) return;
+      const agora = Date.now();
+      let ocupadas = 0;
+      Object.keys(itens).forEach((k) => { const x = itens[k] || {}; if (k !== uid && (x.pago === true || Number(x.expiraMs || 0) > agora)) ocupadas++; });
+      acima = ocupadas >= (Number(d.vagas || FUNDADOR.vagas) || 0);
+      tx.set(ref, { vagas: d.vagas || FUNDADOR.vagas, itens: { [uid]: { pago: true, periodo: periodo, pagoEm: agora, expiraMs: 0 } } }, { merge: true });
+    });
+  } catch (e) { console.error('webhook: nao confirmei a vaga do fundador', uid, (e && e.message) || e); }
+  if (acima) await avisarDono('⚠️ Lote Fundador vendido ACIMA das vagas\n\nLojista (uid): ' + uid + '\nA reserva dele tinha vencido e o lote lotou antes do pagamento. O plano foi liberado (ele pagou).');
+}
+
 function casarPlano(valor, ciclo) {
   const v = Math.round(Number(valor) * 100);
   const c = String(ciclo || '').toUpperCase();
@@ -639,6 +711,16 @@ function casarPlano(valor, ciclo) {
 
 async function planoDaAssinatura(uid, subId, fat, atualDoc, pay) {
   const valido = (pl, pe) => !!(pl && pe && PLANOS[pl] && PLANOS[pl][pe]);
+  /* 01/10/2026 — Lote Fundador em 12x: parcela de cobranca PARCELADA, sem
+     assinatura. O registro que o criar-assinatura gravou manda. */
+  const inst = String((pay && pay.installment) || '');
+  if (inst) {
+    const reg = ((fat && fat.parcelamentosAsaas) || {})[inst];
+    if (reg && valido(reg.plano, reg.periodo)) {
+      return { plano: reg.plano, periodo: reg.periodo, fonte: 'parcelamento', parcelamento: inst, registro: reg };
+    }
+    return null; // parcela sem registro: nunca liga plano no chute
+  }
   const mapa = (fat && fat.assinaturasAsaas) || {};
   if (subId && mapa[subId] && valido(mapa[subId].plano, mapa[subId].periodo)) {
     return { plano: mapa[subId].plano, periodo: mapa[subId].periodo, fonte: 'registro' };
@@ -777,8 +859,15 @@ async function processarEvento(evento, ctx) {
   } catch (_) { fat = {}; }
   const subAtual = String(fat.asaasSubscriptionId || '');
   const deOutraAssinatura = !!(subPaga && subAtual && subPaga !== subAtual);
+  /* 01/10/2026 — a cobranca atual pode ser um PARCELAMENTO (Lote Fundador
+     12x). Parcela de parcelamento que nao e o atual, ou assinatura quando o
+     atual e um parcelamento, conta como "outra cobranca": aviso de desligar
+     dela nao derruba o plano. */
+  const instPaga = String((payReal && payReal.installment) || (pay && pay.installment) || '');
+  const instAtual = String(fat.asaasParcelamentoAtual || '');
+  const deOutraCobranca = instPaga ? (instPaga !== instAtual) : (deOutraAssinatura || !!(subPaga && !subAtual && instAtual));
 
-  if (!LIGA.includes(tipo) && deOutraAssinatura) {
+  if (!LIGA.includes(tipo) && deOutraCobranca) {
     // Estorno/chargeback de pagamento antigo ainda anula a comissao DELE,
     // mas nao derruba o plano pago pela assinatura atual.
     try {
@@ -826,7 +915,39 @@ async function processarEvento(evento, ctx) {
       );
     }
 
-    const dias = (PLANOS[plano] && PLANOS[plano][periodo] && PLANOS[plano][periodo].dias) || 31;
+    /* 01/10/2026 — a cobranca PAGA vira a atual tambem entre assinatura e
+       parcelamento (link antigo pago depois de gerar outro). A outra, sem
+       pagamento, e cancelada; o Paulo e avisado. */
+    if (pp.parcelamento && instPaga && instPaga !== instAtual) {
+      await db.collection('faturamento').doc(uid).set({ asaasParcelamentoAtual: instPaga, asaasSubscriptionId: admin.firestore.FieldValue.delete() }, { merge: true });
+      let cancelou = !subAtual;
+      if (subAtual) { try { await asaas('/subscriptions/' + encodeURIComponent(subAtual), 'DELETE'); cancelou = true; } catch (e) { console.error('webhook: nao cancelei a assinatura', subAtual, (e && e.message) || e); } }
+      await avisarDono('⚠️ Pagamento de cobranca ANTIGA (12x)\n\nLojista (uid): ' + uid + '\nParcelamento pago: ' + instPaga + ' — virou a cobranca atual\n' +
+        (subAtual ? ('Assinatura que estava como atual: ' + subAtual + (cancelou ? ' (cancelada no Asaas)' : ' — NAO consegui cancelar: cancele no Asaas')) : ''));
+    } else if (!pp.parcelamento && subPaga && !subAtual && instAtual) {
+      const regI = ((fat.parcelamentosAsaas || {})[instAtual]) || {};
+      await db.collection('faturamento').doc(uid).set({ asaasSubscriptionId: subPaga, asaasParcelamentoAtual: admin.firestore.FieldValue.delete() }, { merge: true });
+      let cancelou = !!regI.ligadoEm;
+      if (!regI.ligadoEm) { try { await asaas('/installments/' + encodeURIComponent(instAtual), 'DELETE'); cancelou = true; } catch (e) { console.error('webhook: nao cancelei o parcelamento', instAtual, (e && e.message) || e); } }
+      await avisarDono('⚠️ Pagamento de assinatura com parcelamento como atual\n\nLojista (uid): ' + uid + '\nAssinatura paga: ' + subPaga + ' — virou a cobranca atual\nParcelamento: ' + instAtual +
+        (regI.ligadoEm ? ' (JA TINHA PAGO: ele pagou duas vezes — devolva um dos valores no Asaas)' : (cancelou ? ' (cancelado no Asaas)' : ' — NAO consegui cancelar: cancele no Asaas')));
+    }
+
+    const cfgPlano = (PLANOS[plano] && PLANOS[plano][periodo]) || {};
+    if (cfgPlano.fundador) await confirmarVagaFundador(uid, periodo);
+
+    /* 01/10/2026 — PARCELAS DO 12x LIGAM O PLANO UMA VEZ SO.
+       No cartao parcelado o Asaas confirma as 12 parcelas de uma vez, cada uma
+       com o seu vencimento mensal. Cada uma ligando o plano empurraria o
+       vencimento mes a mes (ate 2 anos por 1 ano pago). A primeira que chegar
+       liga 12 meses a partir do 1o vencimento; as outras so geram comissao. */
+    let pularPlano = false;
+    if (pp.parcelamento) {
+      const reg = pp.registro || {};
+      if (reg.ligadoEm) pularPlano = true;
+    }
+
+    const dias = cfgPlano.dias || 31;
     /* 25/09/2026 — O PERIODO PAGO COMECA NO VENCIMENTO DA COBRANCA.
        Antes contava da hora do aviso: quem pagava a renovacao 8 dias antes
        ficava sem plano nos ultimos 8 dias do ciclo (e o anual pago com
@@ -835,7 +956,8 @@ async function processarEvento(evento, ctx) {
        ou depois. Sem dueDate valido, cai no comportamento antigo (hoje).
        Quem paga DURANTE o teste gratis nao perde os dias que faltam: conta a
        partir do fim do teste. */
-    const dueMs = Date.parse(String((payReal && payReal.dueDate) || '') + 'T12:00:00-03:00');
+    const dueBase = pp.parcelamento ? ((pp.registro && pp.registro.primeiroVencimento) || payReal.dueDate) : (payReal && payReal.dueDate);
+    const dueMs = Date.parse(String(dueBase || '') + 'T12:00:00-03:00');
     let base = Number.isFinite(dueMs) ? dueMs : Date.now();
     const venceAtualMs = (atualDoc.vence_em && typeof atualDoc.vence_em.toMillis === 'function') ? atualDoc.vence_em.toMillis() : 0;
     /* testeAte — 23/09/2026: o teste gratis da MAIS que o Pro (fotos e video
@@ -859,7 +981,25 @@ async function processarEvento(evento, ctx) {
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
     };
     if (testeAte) novoDoc.testeAte = testeAte;
-    await ref.set(novoDoc, { merge: true });
+    if (!pularPlano) {
+      await ref.set(novoDoc, { merge: true });
+      if (pp.parcelamento) {
+        await db.collection('faturamento').doc(uid).set({ parcelamentosAsaas: { [pp.parcelamento]: { ligadoEm: admin.firestore.FieldValue.serverTimestamp(), venceEm: novoDoc.vence_em } } }, { merge: true });
+      }
+      /* Lote Fundador a vista pago DURANTE o teste: a cobranca venceu hoje (o
+         dinheiro entrou agora) e o plano conta do fim do teste. Sem ajuste, a
+         renovacao do 2o ano viria 1 ano depois de HOJE — o lojista perderia os
+         dias de teste no ano seguinte. A proxima cobranca da assinatura passa
+         para o fim do periodo pago. Best-effort: falhou, o Paulo e avisado. */
+      if (cfgPlano.fundador && !pp.parcelamento && testeAte && subPaga) {
+        const proxima = new Date(vence.getTime() - 3 * 86400000 - 3 * 3600000).toISOString().slice(0, 10);
+        try { await asaas('/subscriptions/' + encodeURIComponent(subPaga), 'POST', { nextDueDate: proxima }); }
+        catch (e) {
+          await avisarDono('⚠️ Lote Fundador: nao ajustei a renovacao\n\nLojista (uid): ' + uid + '\nAssinatura: ' + subPaga +
+            '\nAjuste a proxima cobranca para ' + proxima + ' no painel do Asaas (o plano vale ate la).');
+        }
+      }
+    }
     if (payIdLiga) {
       await db.collection('faturamento').doc(uid).set({ pagosLigados: { [payIdLiga]: admin.firestore.FieldValue.serverTimestamp() } }, { merge: true })
         .catch((e) => console.error('pagosLigados (ignorado):', e && e.message));
@@ -920,6 +1060,14 @@ async function processarEvento(evento, ctx) {
         await estornarComissoes(String(pay.id || ''));
       }
     } catch (ce) { console.error('estorno comissao erro:', ce); }
+
+    /* 01/10/2026 — Lote Fundador devolvido (garantia de 30 dias) ou contestado:
+       a vaga volta para o lote. */
+    if ((tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') && /^fundador/.test(String(atualDoc.periodo || ''))) {
+      try {
+        await db.collection('oferta_fundador').doc('estado').set({ itens: { [uid]: { pago: false, expiraMs: 0, devolvidoEm: Date.now() } } }, { merge: true });
+      } catch (ve) { console.error('vaga fundador (devolucao) erro:', ve); }
+    }
   }
 
   return { ok: true, tratado: 'assinatura', uid, tipo };

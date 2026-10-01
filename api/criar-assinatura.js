@@ -1,17 +1,101 @@
-// versao 2026-09-25-email (so assina com e-mail confirmado; teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
+// versao 2026-10-01-fundador (Lote Fundador: vaga contada no servidor, cobranca no ato, 12x no cartao por cobranca parcelada)
+// anterior: 2026-09-25-email (so assina com e-mail confirmado; teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
 // POST /api/criar-assinatura
 // Chamado pelo painel quando o lojista escolhe um plano.
 // Cria (ou reaproveita) o cliente no Asaas, cria a assinatura recorrente e
 // devolve o link da primeira cobranca pro lojista pagar (Pix, cartao ou boleto).
 
 const { admin, db } = require('../lib/firebase');
-const { asaas, PLANOS } = require('../lib/asaas');
+const { asaas, PLANOS, FUNDADOR } = require('../lib/asaas');
+
+/* ===========================================================================
+   LOTE FUNDADOR — 01/10/2026
+   Vagas contadas AQUI, no servidor, num documento so (oferta_fundador/estado,
+   colecao na raiz sem regra = so o robo). A vaga e RESERVADA quando a cobranca
+   nasce (FUNDADOR.reservaDias) e vira VENDIDA quando o webhook confirma o
+   pagamento. Reserva vencida sem pagamento volta sozinha para a conta.
+   O mesmo lojista clicando de novo reaproveita a propria vaga. A pagina
+   /fundador e o painel leem o placar pelo GET deste mesmo endereco (sem
+   login, so numeros: vagas, restam, prazo) e mostram "restam N": numero na
+   tela e numero contado.
+=========================================================================== */
+const ESTADO_FUNDADOR = () => db.collection('oferta_fundador').doc('estado');
+
+function vagasOcupadas(itens, agora) {
+  let n = 0;
+  Object.keys(itens || {}).forEach((k) => {
+    const it = itens[k] || {};
+    if (it.pago === true || Number(it.expiraMs || 0) > agora) n++;
+  });
+  return n;
+}
+
+async function reservarVagaFundador(uid, periodo) {
+  const agora = Date.now();
+  const vagas = Number(FUNDADOR.vagas) || 0;
+  return db.runTransaction(async (tx) => {
+    const ref = ESTADO_FUNDADOR();
+    const s = await tx.get(ref);
+    const d = s.exists ? (s.data() || {}) : {};
+    const itens = d.itens || {};
+    const meu = itens[uid];
+    if (meu && meu.pago === true) { const e = new Error('ja_fundador'); e.code = 'ja_fundador'; throw e; }
+    const jaTenho = !!(meu && Number(meu.expiraMs || 0) > agora);
+    if (!jaTenho && vagasOcupadas(itens, agora) >= vagas) {
+      const e = new Error('esgotado'); e.code = 'esgotado'; throw e;
+    }
+    tx.set(ref, {
+      vagas: vagas,
+      encerraEm: FUNDADOR.encerraEm,
+      itens: { [uid]: { expiraMs: agora + FUNDADOR.reservaDias * 86400000, pago: false, periodo: periodo, reservadoEm: agora } },
+      atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return true;
+  });
+}
+
+async function liberarVagaFundador(uid) {
+  try {
+    await db.runTransaction(async (tx) => {
+      const ref = ESTADO_FUNDADOR();
+      const s = await tx.get(ref);
+      const it = s.exists ? ((s.data() || {}).itens || {})[uid] : null;
+      if (it && it.pago !== true) tx.set(ref, { itens: { [uid]: { expiraMs: 0, pago: false } } }, { merge: true });
+    });
+  } catch (e) { console.error('criar-assinatura: nao liberei a vaga do fundador', uid, (e && e.message) || e); }
+}
 
 /* Cancela no Asaas a assinatura anterior do mesmo lojista (a que ficou
    abandonada ou vencida). So cancela se ela ainda estiver viva. Nunca derruba
    a assinatura nova: se falhar, avisa o Paulo no Telegram para cancelar a mao
    — o webhook ja ignora os avisos dela, entao o risco que sobra e so o de
    cobranca em dobro se o cliente pagar as duas. */
+/* 01/10/2026 — cobranca parcelada (12x) gerada e NAO paga e cancelada quando
+   o lojista gera outra cobranca: o link antigo deixa de aceitar pagamento e a
+   parcela vencida dele nunca derruba o plano novo. Parcelamento que ja ligou
+   o plano nunca e tocado (nao chega aqui: o lojista pagante recebe ja_ativo). */
+async function cancelarParcelamentoPendente(fat, uid) {
+  const inst = String((fat && fat.asaasParcelamentoAtual) || '');
+  if (!inst) return;
+  const reg = ((fat && fat.parcelamentosAsaas) || {})[inst] || {};
+  if (reg.ligadoEm) return;
+  try {
+    try { await asaas('/installments/' + encodeURIComponent(inst), 'DELETE'); }
+    catch (e) { if (!(e && e.status === 404)) throw e; }
+    await db.collection('faturamento').doc(uid).set({
+      parcelamentosCancelados: admin.firestore.FieldValue.arrayUnion(inst),
+    }, { merge: true });
+  } catch (e) {
+    console.error('criar-assinatura: nao cancelou o parcelamento', inst, (e && e.message) || e);
+    await avisarDono(
+      '⚠️ Parcelamento antigo NAO foi cancelado no Asaas\n\n' +
+      'Lojista (uid): ' + uid + '\n' +
+      'Parcelamento: ' + inst + '\n\n' +
+      'O lojista gerou uma cobranca nova. Cancele o parcelamento antigo no Asaas para ele nao pagar duas vezes.'
+    );
+  }
+}
+
 async function cancelarAnterior(subId, uid) {
   try {
     let viva = true;
@@ -49,17 +133,42 @@ async function avisarDono(texto) {
   } catch (_) {}
 }
 
-module.exports = async (req, res) => {
+/* Placar publico do Lote Fundador (01/10/2026). So numeros, nenhum uid.
+   Cache de 60 s na borda: a pagina pode ter pico sem virar leitura no banco. */
+async function placarFundador(res) {
+  const vagas = Number(FUNDADOR.vagas) || 0;
+  const encerraMs = Date.parse(FUNDADOR.encerraEm);
+  let ocupadas = 0;
+  try {
+    const snap = await ESTADO_FUNDADOR().get();
+    ocupadas = snap.exists ? vagasOcupadas((snap.data() || {}).itens, Date.now()) : 0;
+  } catch (e) {
+    console.error('placar fundador:', (e && e.message) || e);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(503).json({ erro: 'indisponivel' });
+  }
+  const restam = Math.max(0, vagas - ocupadas);
+  res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120');
+  return res.status(200).json({
+    vagas, restam, encerraEm: FUNDADOR.encerraEm,
+    aberto: restam > 0 && Date.now() <= encerraMs,
+    avista: PLANOS.enterprise.fundador.value, parcelas: PLANOS.enterprise.fundador12x.parcelas,
+    parcela: PLANOS.enterprise.fundador12x.value, mensal: PLANOS.enterprise.mensal.value,
+  });
+}
+
+module.exports = async function criarAssinatura(req, res) {
   // O painel chama isso do navegador. Liberamos AS DUAS origens da empresa
   // (site e app) durante e depois da migração pro subdomínio. Só ecoa de volta
   // quando a origem está na lista — nunca '*', pra não abrir pra qualquer site.
-  const ORIGENS_PERMITIDAS = ['https://moviki.com.br', 'https://app.moviki.com.br'];
+  const ORIGENS_PERMITIDAS = ['https://moviki.com.br', 'https://www.moviki.com.br', 'https://app.moviki.com.br'];
   const origem = req.headers.origin;
   if (ORIGENS_PERMITIDAS.includes(origem)) res.setHeader('Access-Control-Allow-Origin', origem);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method === 'GET') return placarFundador(res);
   if (req.method !== 'POST') return res.status(405).json({ erro: 'Metodo nao permitido' });
 
   try {
@@ -92,6 +201,12 @@ module.exports = async (req, res) => {
     const { plano, periodo, cpfCnpj, nome, gaClientId, gaSessionId } = req.body || {};
     if (!PLANOS[plano] || !PLANOS[plano][periodo]) {
       return res.status(400).json({ erro: 'Plano ou periodo invalido.' });
+    }
+    const cfg0 = PLANOS[plano][periodo];
+    /* Lote Fundador: prazo para GERAR a cobranca. Depois dele, o periodo deixa de
+       existir para quem ainda nao gerou (a pagina e o painel ja escondem). */
+    if (cfg0.fundador && Date.now() > Date.parse(FUNDADOR.encerraEm)) {
+      return res.status(410).json({ erro: 'O Lote Fundador encerrou. Os outros planos continuam disponíveis.', motivo: 'fundador_encerrado' });
     }
     if (!cpfCnpj) return res.status(400).json({ erro: 'CPF ou CNPJ e obrigatorio.' });
     const docNum = String(cpfCnpj).replace(/\D/g, '');
@@ -145,6 +260,19 @@ module.exports = async (req, res) => {
     const nomeSeguro = nome ? String(nome).slice(0, 120) : undefined;
     const cfg = PLANOS[plano][periodo];
 
+    /* Lote Fundador: reserva a vaga ANTES de qualquer cobranca existir. Sem
+       vaga, nenhuma cobranca nasce. */
+    let vagaReservada = false;
+    if (cfg.fundador) {
+      try { await reservarVagaFundador(uid, periodo); vagaReservada = true; }
+      catch (e) {
+        if (e.code === 'esgotado') return res.status(409).json({ erro: 'As vagas do Lote Fundador acabaram. Os outros planos continuam disponíveis.', motivo: 'fundador_esgotado' });
+        if (e.code === 'ja_fundador') return res.status(409).json({ erro: 'Você já garantiu o seu Lote Fundador.', motivo: 'ja_fundador' });
+        throw e;
+      }
+    }
+    try {
+
     // 3) Cliente no Asaas: reaproveita se ja existe (guardado em faturamento/{uid},
     //    colecao privada que so o robo acessa), senao cria e guarda.
     const fatRef = db.collection('faturamento').doc(uid);
@@ -191,13 +319,60 @@ module.exports = async (req, res) => {
     //      como atual, e o webhook ignora evento de assinatura que nao e a
     //      atual. Se o cancelamento falhar, o Paulo e avisado no Telegram.
     const anteriorId = fatSnap.exists ? String(fatSnap.data().asaasSubscriptionId || '') : '';
-    const hoje = new Date().toISOString().slice(0, 10);
+    const hoje = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10);
     let primeiraCobranca = hoje;
-    if (emTeste && jaVenceMs > Date.now()) {
+    /* Lote Fundador: a cobranca vence HOJE, mesmo no teste gratis (o dinheiro
+       entra agora); o webhook faz os 12 meses comecarem no fim do teste. */
+    if (emTeste && jaVenceMs > Date.now() && !cfg.fundador) {
       // Data do fim do teste no fuso de Brasilia (AAAA-MM-DD).
       const fim = new Date(jaVenceMs - 3 * 3600000).toISOString().slice(0, 10);
       if (fim > hoje) primeiraCobranca = fim;
     }
+    /* LOTE FUNDADOR EM 12x NO CARTAO. Assinatura do Asaas nao parcela: aqui
+       nasce uma COBRANCA PARCELADA (12 parcelas no cartao, o cartao e digitado
+       na pagina do Asaas — nunca passa pelo Moviki). O webhook reconhece as
+       parcelas por faturamento/{uid}.parcelamentosAsaas.{installment}. Nao ha
+       assinatura atual: a anterior (se houver) e cancelada e o campo sai, para
+       um aviso dela nunca derrubar o plano pago em parcelas. */
+    if (cfg.parcelado) {
+      const pag = await asaas('/payments', 'POST', {
+        customer: asaasCustomerId,
+        billingType: 'CREDIT_CARD',
+        installmentCount: cfg.parcelas,
+        installmentValue: cfg.value,
+        dueDate: hoje,
+        description: 'Moviki ENTERPRISE - Lote Fundador (' + cfg.parcelas + 'x de R$ ' + cfg.value.toFixed(2).replace('.', ',') + ')',
+        externalReference: uid,
+      });
+      const inst = String((pag && pag.installment) || '');
+      if (!inst) throw new Error('Asaas nao devolveu o parcelamento');
+      await fatRef.set({
+        asaasSubscriptionId: admin.firestore.FieldValue.delete(),
+        asaasParcelamentoAtual: inst,
+        parcelamentosAsaas: {
+          [inst]: {
+            plano, periodo, valor: cfg.total, parcelas: cfg.parcelas, valorParcela: cfg.value,
+            primeiroVencimento: hoje, emTeste: !!emTeste,
+            criadaEm: admin.firestore.FieldValue.serverTimestamp(),
+          },
+        },
+      }, { merge: true });
+      if (anteriorId) await cancelarAnterior(anteriorId, uid);
+      if (fatSnap.exists && String(fatSnap.data().asaasParcelamentoAtual || '') !== inst) await cancelarParcelamentoPendente(fatSnap.data(), uid);
+      try {
+        const gaCid = gaClientId ? String(gaClientId).slice(0, 64) : '';
+        const gaSid = gaSessionId ? String(gaSessionId).slice(0, 40) : '';
+        if (gaCid || gaSid) await fatRef.set({ gaClientId: gaCid, gaSessionId: gaSid }, { merge: true });
+      } catch (_) {}
+      if (!emTeste) {
+        await db.collection('assinaturas').doc(uid).set({
+          plano, periodo, ativo: false,
+          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      return res.status(200).json({ ok: true, invoiceUrl: pag.invoiceUrl || null, parcelamentoId: inst, primeiraCobranca: hoje, emTeste: !!emTeste, fundador: true });
+    }
+
     const assin = await asaas('/subscriptions', 'POST', {
       customer: asaasCustomerId,
       billingType: 'UNDEFINED', // deixa o lojista escolher Pix, cartao ou boleto
@@ -209,10 +384,12 @@ module.exports = async (req, res) => {
     });
     await fatRef.set({
       asaasSubscriptionId: assin.id,
+      asaasParcelamentoAtual: admin.firestore.FieldValue.delete(),
       assinaturasAsaas: {
         [assin.id]: {
           plano, periodo, valor: cfg.value,
           emTeste: !!emTeste,
+          fundador: !!cfg.fundador,
           criadaEm: admin.firestore.FieldValue.serverTimestamp(),
         },
       },
@@ -221,6 +398,7 @@ module.exports = async (req, res) => {
     if (anteriorId && anteriorId !== assin.id) {
       await cancelarAnterior(anteriorId, uid);
     }
+    if (fatSnap.exists) await cancelarParcelamentoPendente(fatSnap.data(), uid);
 
     // GA4: guarda os ids da sessao do navegador (mandados pelo painel) pra
     // amarrar a venda quando o pagamento confirmar no webhook. Best-effort:
@@ -254,7 +432,12 @@ module.exports = async (req, res) => {
       else await new Promise((r) => setTimeout(r, 1500));
     }
 
-    return res.status(200).json({ ok: true, invoiceUrl, subscriptionId: assin.id, primeiraCobranca, emTeste: !!emTeste });
+    return res.status(200).json({ ok: true, invoiceUrl, subscriptionId: assin.id, primeiraCobranca, emTeste: !!emTeste, fundador: !!cfg.fundador });
+    } catch (eCriar) {
+      /* A cobranca nao nasceu: a vaga reservada volta na hora. */
+      if (vagaReservada) await liberarVagaFundador(uid);
+      throw eCriar;
+    }
     } finally {
       try { await travaRef.set({ gerandoAssinaturaAte: 0 }, { merge: true }); } catch (_) {}
     }
@@ -268,3 +451,7 @@ module.exports = async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao criar a assinatura. Tente de novo em instantes.' });
   }
 };
+
+module.exports.reservarVagaFundador = reservarVagaFundador;
+module.exports.liberarVagaFundador = liberarVagaFundador;
+module.exports.vagasOcupadas = vagasOcupadas;
