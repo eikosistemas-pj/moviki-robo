@@ -1,4 +1,5 @@
-// api/pagar-saque.js | versao 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)  (repo: moviki-robo)
+// anterior: 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')
 // Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
 // a permissão é conferida AQUI no servidor, não dá para burlar pelo app.
 //
@@ -36,6 +37,80 @@ const TRAVA_MS = 3 * 60 * 1000;
 
 // Valor máximo de uma comissão de TESTE (etapa 'teste').
 const VALOR_MAX_TESTE = 10;
+
+/* B14 (01/10/2026) — DOIS SAQUES DIFERENTES PAGANDO AS MESMAS COMISSOES.
+   As travas B12/B13 seguram o MESMO saque (clique duplo, retomada). Nada
+   segurava dois saques DIFERENTES do mesmo parceiro: um pedido dele e um
+   pagamento avulso do dono, dois pedidos abertos, ou um saque novo enquanto o
+   anterior estava com o Pix "em duvida" (o Asaas nao respondeu) ou com a baixa
+   pendente. Os dois selecionavam as mesmas comissoes nao pagas — a baixa so
+   acontece DEPOIS do Pix — e saiam dois Pix.
+   Agora existe UMA trava por parceiro, `saque_trava/{parceiroUid}` (colecao na
+   raiz, sem regra = so o robo), pega numa transacao antes de qualquer Pix ou
+   registro manual:
+     - outro saque com a trava viva (menos de TRAVA_PARCEIRO_MS) -> recusa;
+     - outro saque com Pix EM DUVIDA (incerto) -> recusa SEM prazo, ate o dono
+       resolver aquele saque (ele mesmo pode tentar de novo: o Asaas recusa a
+       segunda transferencia do mesmo id);
+     - outro saque com a baixa das comissoes pendente -> recusa;
+   A trava sai quando o saque termina (pago e quitado, ou recusado de verdade). */
+const TRAVA_PARCEIRO_MS = 10 * 60 * 1000;
+
+function erroCod(code, extra) { const e = new Error(code); e.code = code; if (extra) Object.assign(e, extra); return e; }
+
+async function pegarTravaParceiro(parceiroUid, saqueId) {
+  const ref = db.collection('saque_trava').doc(parceiroUid);
+  await db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    if (s.exists) {
+      const d = s.data() || {};
+      if (d.saqueId && d.saqueId !== saqueId) {
+        if (d.incerto === true) throw erroCod('outro_saque_incerto', { outro: d.saqueId });
+        const em = ms(d.em);
+        if (em && (Date.now() - em) < TRAVA_PARCEIRO_MS) throw erroCod('outro_saque_em_curso', { outro: d.saqueId });
+      }
+    }
+    tx.set(ref, { saqueId: saqueId, em: admin.firestore.FieldValue.serverTimestamp(), incerto: false });
+  });
+  /* Baixa pendente de OUTRO saque: o Pix dele ja saiu e as comissoes ainda
+     nao foram marcadas. Pagar agora pagaria de novo. */
+  const pend = await db.collection('saques').where('parceiroUid', '==', parceiroUid)
+    .where('quitacaoPendente', '==', true).get();
+  const outro = pend.docs.find((d) => d.id !== saqueId);
+  if (outro) {
+    await soltarTravaParceiro(parceiroUid, saqueId);
+    throw erroCod('outro_saque_baixa_pendente', { outro: outro.id });
+  }
+}
+
+async function marcarTravaIncerta(parceiroUid, saqueId) {
+  try {
+    await db.collection('saque_trava').doc(parceiroUid).set({ saqueId: saqueId, incerto: true, em: admin.firestore.FieldValue.serverTimestamp() });
+  } catch (e) { console.error('pagar-saque: nao marquei a trava incerta', parceiroUid, saqueId, e); }
+}
+
+async function soltarTravaParceiro(parceiroUid, saqueId) {
+  const ref = db.collection('saque_trava').doc(parceiroUid);
+  try {
+    await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (s.exists && (s.data() || {}).saqueId === saqueId) tx.delete(ref);
+    });
+  } catch (e) { console.error('pagar-saque: nao soltei a trava', parceiroUid, saqueId, e); }
+}
+
+function respostaTrava(res, err) {
+  const msgs = {
+    outro_saque_incerto: 'Outro pagamento deste parceiro (saque ' + err.outro + ') ficou SEM CONFIRMACAO do Asaas. ' +
+      'Confira em Transferencias no painel do Asaas e resolva aquele saque primeiro (tentar de novo nele e seguro). ' +
+      'Nenhum valor saiu agora.',
+    outro_saque_em_curso: 'Outro pagamento deste parceiro (saque ' + err.outro + ') esta sendo processado agora. ' +
+      'Aguarde alguns minutos e atualize. Nenhum valor saiu.',
+    outro_saque_baixa_pendente: 'O saque ' + err.outro + ' deste parceiro ja foi pago e a baixa das comissoes nao terminou. ' +
+      'Abra aquele saque e clique em pagar de novo para concluir a baixa (nenhum valor novo sai). So depois pague outro.',
+  };
+  res.status(409).json({ ok: false, erro: err.code, outroSaque: err.outro || null, mensagem: msgs[err.code] || 'Outro saque em curso.' });
+}
 
 /* ---------------------------------------------------------------
    Chave Pix: descobrir o tipo a partir do que o parceiro digitou.
@@ -312,6 +387,7 @@ module.exports = async (req, res) => {
                     'nenhum valor novo sai.' });
         return;
       }
+      await soltarTravaParceiro(parceiroUid, saqueRef.id);
       res.status(200).json({ ok: true, retomada: true, qtd: quitadas,
         mensagem: 'Baixa concluida. Nenhum valor novo saiu.' });
       return;
@@ -342,6 +418,10 @@ module.exports = async (req, res) => {
       if (avulso) {
         saqueRef = db.collection('saques').doc();
       }
+      /* B14 — registrar na mao tambem respeita a trava do parceiro: com outro
+         Pix em duvida, registrar este marcaria comissoes que o outro ja pagou. */
+      try { await pegarTravaParceiro(parceiroUid, saqueRef.id); }
+      catch (err) { if (err.code && err.code.indexOf('outro_saque') === 0) { respostaTrava(res, err); return; } throw err; }
       const dadosSaque = {
         status: 'pago',
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
@@ -369,6 +449,7 @@ module.exports = async (req, res) => {
       try {
         qtdM = await quitarComissoes(sel.escolhidas, saqueRef.id);
         await saqueRef.update({ quitacaoPendente: false });
+        await soltarTravaParceiro(parceiroUid, saqueRef.id);
       } catch (err) {
         res.status(500).json({ ok: false, erro: 'quitacao',
           mensagem: 'O saque foi registrado como pago, mas a baixa parou em ' + qtdM +
@@ -488,6 +569,16 @@ module.exports = async (req, res) => {
       }
     }
 
+    /* B14 — trava por parceiro, depois da trava do proprio saque e antes do Pix. */
+    try { await pegarTravaParceiro(parceiroUid, saqueRef.id); }
+    catch (err) {
+      if (err.code && err.code.indexOf('outro_saque') === 0) {
+        await saqueRef.update({ pagamentoEmCursoEm: null }).catch(() => {});
+        respostaTrava(res, err); return;
+      }
+      throw err;
+    }
+
     // Manda o Pix. externalReference = id do saque (rastreia lá no Asaas e
     // serve de trava: o Asaas recusa uma segunda transferência com o mesmo).
     let transf;
@@ -536,6 +627,7 @@ module.exports = async (req, res) => {
           ultimoErroEm: admin.firestore.FieldValue.serverTimestamp(),
         });
         if (incerto) {
+          await marcarTravaIncerta(parceiroUid, saqueRef.id);
           res.status(502).json({ ok: false, erro: 'asaas_incerto',
             mensagem: 'O Asaas não respondeu e eu NÃO sei se o Pix saiu. NÃO pague na mão. ' +
                       'Confira em Transferências no painel do Asaas. Se não estiver lá, clique em ' +
@@ -543,6 +635,7 @@ module.exports = async (req, res) => {
                       'segunda transferência deste mesmo saque, então tentar de novo é seguro.' });
           return;
         }
+        await soltarTravaParceiro(parceiroUid, saqueRef.id);
         res.status(502).json({ ok: false, erro: 'asaas',
           mensagem: 'O Asaas recusou a transferência: ' + (msg || 'erro') +
                     '. Nenhum valor saiu e nada foi quitado.' });
@@ -555,6 +648,9 @@ module.exports = async (req, res) => {
     // Se a conta Asaas exige aprovação em duas etapas, a transferência nasce
     // NÃO autorizada. O dinheiro ainda não saiu: não quita nada aqui.
     if (transf && transf.authorized === false) {
+      /* B14: a transferencia existe e sai quando o dono autorizar no Asaas. Ate
+         la nenhum OUTRO saque deste parceiro pode pagar as mesmas comissoes. */
+      await marcarTravaIncerta(parceiroUid, saqueRef.id);
       await saqueRef.update({
         pagamentoEmCursoEm: null,
         transferenciaId: transf.id || null,
@@ -568,6 +664,7 @@ module.exports = async (req, res) => {
     }
 
     if (st === 'CANCELLED' || st === 'FAILED') {
+      await soltarTravaParceiro(parceiroUid, saqueRef.id);
       await saqueRef.update({
         pagamentoEmCursoEm: null,
         ultimoErroPagamento: 'transferencia ' + st + ' ' + String((transf && transf.failReason) || ''),
@@ -602,6 +699,7 @@ module.exports = async (req, res) => {
     try {
       qtdQ = await quitarComissoes(sel.escolhidas, saqueRef.id);
       await saqueRef.update({ quitacaoPendente: false, comissoesQuitadas: qtdQ });
+      await soltarTravaParceiro(parceiroUid, saqueRef.id);
     } catch (err) {
       console.error('pagar-saque: quitacao parcial', saqueRef.id, qtdQ, err);
       await saqueRef.update({ comissoesQuitadas: qtdQ }).catch(() => {});
@@ -630,3 +728,6 @@ module.exports.selecionarComissoes = selecionarComissoes;
 module.exports.LOTE_QUITACAO = LOTE_QUITACAO;
 module.exports.quitarComissoes = quitarComissoes;
 module.exports.TETO_SAQUE_AUTOMATICO = TETO_SAQUE_AUTOMATICO;
+module.exports.pegarTravaParceiro = pegarTravaParceiro;
+module.exports.soltarTravaParceiro = soltarTravaParceiro;
+module.exports.marcarTravaIncerta = marcarTravaIncerta;
