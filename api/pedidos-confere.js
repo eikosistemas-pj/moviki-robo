@@ -1,4 +1,4 @@
-// versao 2026-09-30-estoque (varredura de pedidos + comprovantes + retencao + reservas de estoque vencidas)
+// versao 2026-10-03-segredo (CRON_SECRET em tempo constante; erro generico na resposta) | base 2026-09-30-estoque (varredura de pedidos + comprovantes + retencao + reservas de estoque vencidas)
 // GET /api/pedidos-confere  (cron a cada 5 minutos, protegido por CRON_SECRET)
 //
 // Confere no Asaas os pedidos da live e do cardapio que ainda estao
@@ -12,13 +12,14 @@
 // Env (Vercel do moviki-robo): CRON_SECRET.
 
 const checkout = require('../lib/checkout');
+const { bearerConfere } = require('../lib/segredo');
 
 module.exports = async (req, res) => {
   try {
     const secret = process.env.CRON_SECRET;
     if (!secret) { res.status(200).json({ ok: false, motivo: 'sem_config_CRON_SECRET' }); return; }
     // So pelo cabecalho que a propria Vercel manda no cron (segredo fora da URL e dos logs).
-    if (req.headers.authorization !== 'Bearer ' + secret) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
+    if (!bearerConfere(req, secret)) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
     const r = await checkout.varrerPedidosGateway(40);
     /* 23/09 (rodada 3): uma vez por dia (06:00-06:04 UTC) apaga comprovantes Pix com mais de 90 dias. */
@@ -35,6 +36,6 @@ module.exports = async (req, res) => {
     res.status(200).json(Object.assign({ ok: true }, r));
   } catch (e) {
     console.error('pedidos-confere erro:', e);
-    res.status(200).json({ ok: false, erro: (e && e.message) ? e.message : 'erro' });
+    res.status(200).json({ ok: false, erro: 'falha_interna' }); // 03/10: detalhe so no log da Vercel
   }
 };

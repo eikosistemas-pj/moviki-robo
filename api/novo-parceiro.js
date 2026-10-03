@@ -1,4 +1,4 @@
-// api/novo-parceiro.js | versao 2026-09-16-leadparceiro  (repo: moviki-robo)
+// api/novo-parceiro.js | versao 2026-10-03-segredo (CRON_SECRET comparado em tempo constante)  (repo: moviki-robo)
 // api/novo-parceiro.js  (repo: moviki-robo)
 //
 // Tem TRÊS papéis nesse arquivo (consolidados aqui de propósito — o plano
@@ -44,6 +44,7 @@
 //                               devolve "sem_config" e o quiz segue sem cartão.
 
 const { admin, db } = require('../lib/firebase');
+const { bearerConfere } = require('../lib/segredo');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { buscarPerfil } = require('../lib/instagram');
 const { gravarEspelho, espelharPorUid } = require('../lib/espelhoParceiro');
@@ -138,7 +139,7 @@ async function buscarInstagram(req, res) {
   // Protegido pelo CRON_SECRET (o mesmo do branch 2) — a mensagem de erro da
   // Meta as vezes cita o nosso id, entao nao pode ficar aberta pra qualquer um.
   const segredo = process.env.CRON_SECRET;
-  const diag = !!segredo && String(req.headers.authorization || '') === 'Bearer ' + segredo; // 23/09: diagnostico so com o segredo no cabecalho
+  const diag = bearerConfere(req, segredo); // 03/10: tempo constante (lib/segredo.js) // 23/09: diagnostico so com o segredo no cabecalho
 
   try {
     const r = await buscarPerfil(admin, db, q.instagram, { ip: diag ? null : ip, semCache: diag });
@@ -301,7 +302,7 @@ async function processarPendentes(req, res) {
   if (!secret) { res.status(200).json({ ok: false, motivo: 'sem_config_CRON_SECRET' }); return; }
 
   const q = req.query || {};
-  const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
+  const viaCabecalho = bearerConfere(req, secret); // 03/10: tempo constante
   const viaQuery     = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
   if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 

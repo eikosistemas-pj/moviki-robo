@@ -1,4 +1,4 @@
-// versao 2026-09-23-repro2 (esgotado vira 'desistido' e sai da fila)
+// versao 2026-10-03-segredo (CRON_SECRET em tempo constante; base 2026-09-23-repro2: esgotado vira 'desistido' e sai da fila)
 // GET /api/webhook-reprocessa  (cron de hora em hora, protegido por CRON_SECRET)
 //
 // Rede de seguranca do webhook do Asaas. Desde 14/09/2026 o /api/webhook
@@ -15,6 +15,7 @@
 // Env (Vercel do moviki-robo): CRON_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID.
 
 const { admin, db } = require('../lib/firebase');
+const { bearerConfere } = require('../lib/segredo');
 const webhook = require('./webhook');
 
 const COL = webhook.EVENTOS_COL || 'webhook_eventos';
@@ -43,7 +44,7 @@ module.exports = async (req, res) => {
     if (!secret) { res.status(200).json({ ok: false, motivo: 'sem_config_CRON_SECRET' }); return; }
 
     const q = req.query || {};
-    const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
+    const viaCabecalho = bearerConfere(req, secret); // 03/10: tempo constante
     const viaQuery = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 

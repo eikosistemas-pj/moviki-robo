@@ -1,4 +1,5 @@
-// api/pagar-saque.js | versao 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-10-03-admingoogle (acao de dono so com sessao do Google)  (repo: moviki-robo)
+// anterior: 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)
 // anterior: 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')
 // Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
 // a permissão é conferida AQUI no servidor, não dá para burlar pelo app.
@@ -25,6 +26,7 @@
 // Trava: acima de TETO_SAQUE_AUTOMATICO o robô se recusa a mandar sozinho.
 
 const { admin, db } = require('../lib/firebase');
+const { conferirAdmin } = require('../lib/admin');
 const { asaas } = require('../lib/asaas');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
@@ -280,8 +282,8 @@ module.exports = async (req, res) => {
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
-    const adminDoc = await db.collection('admins').doc(decoded.uid).get();
-    if (!adminDoc.exists) { res.status(403).json({ ok: false, erro: 'sem permissao' }); return; }
+    const adm = await conferirAdmin(db, decoded);
+    if (!adm.ok) { res.status(adm.status).json({ ok: false, erro: adm.erro === 'nao_admin' ? 'sem permissao' : adm.erro, mensagem: adm.mensagem }); return; }
 
     // ---------- etapa TESTE: cria uma comissão de mentira para ensaiar ----------
     if (etapa === 'teste') {

@@ -10,7 +10,7 @@ const { store, Timestamp } = fake;
 require.cache[require.resolve(path.join(ROBO, 'lib/firebase.js'))] = { id: 'f', filename: 'f', loaded: true, exports: { admin: fake.admin, db: fake.db } };
 const boas = { enviarBoasVindasParceiro: async () => ({ ok: true }) };
 require.cache[require.resolve(path.join(ROBO, 'lib/boasVindasParceiro.js'))] = { id: 'b', filename: 'b', loaded: true, exports: boas };
-fake.admin.auth = () => ({ verifyIdToken: async (t) => { if (t === 'ruim') throw new Error('x'); return { uid: t }; } });
+fake.admin.auth = () => ({ verifyIdToken: async (t) => { if (t === 'ruim') throw new Error('x'); return { uid: t, firebase: { sign_in_provider: 'google.com' } }; } });
 
 const { trocarApelido, normalizarApelidos, limparApelido } = require(path.join(ROBO, 'lib/trocaApelido.js'));
 const { gravarEspelho } = require(path.join(ROBO, 'lib/espelhoParceiro.js'));

@@ -1,3 +1,4 @@
+// versao 2026-10-03-segredo (CRON_SECRET comparado em tempo constante)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -13,6 +14,7 @@
 // Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
 
 const { admin, db } = require('../lib/firebase');
+const { bearerConfere } = require('../lib/segredo');
 const { normalizarApelidos } = require('../lib/trocaApelido');
 
 const EMAIL_FROM = 'Moviki <suporte@moviki.com.br>';
@@ -31,7 +33,7 @@ module.exports = async (req, res) => {
     if (!secret) { res.status(200).json({ ok: false, motivo: 'sem_config_CRON_SECRET' }); return; }
 
     const q = req.query || {};
-    const viaCabecalho = req.headers.authorization === 'Bearer ' + secret;
+    const viaCabecalho = bearerConfere(req, secret); // 03/10: tempo constante
     const viaQuery     = false; // 23/09 (seguranca): segredo so no cabecalho — na URL ele vai parar em log
     if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
