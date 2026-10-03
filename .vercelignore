@@ -1,0 +1,7 @@
+# 03/10/2026: o que nao e funcao nao sobe para a Vercel.
+# (A pasta public/ e o que a Vercel serve como site; lib/ entra nas funcoes
+#  pelo require, nunca como arquivo publico.)
+CLAUDE.md
+README.md
+testes
+.claude
