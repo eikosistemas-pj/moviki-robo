@@ -1,3 +1,4 @@
+// versao 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // versao 2026-10-01-apelido (acao 'trocar_apelido': o dono troca apelido e nome do parceiro)
 // versao 2026-09-23-espelho (acao 'espelho': suspensao/recusa derruba o cracha publico)
 // api/parceiro-aprovado.js  (repo: moviki-robo)
@@ -13,6 +14,7 @@
 //   RESEND_API_KEY  -> chave da API do provedor de e-mail
 
 const { admin, db } = require('../lib/firebase');
+const { conferirAdmin } = require('../lib/admin');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { gravarEspelho } = require('../lib/espelhoParceiro');
 const { trocarApelido } = require('../lib/trocaApelido');
@@ -39,8 +41,8 @@ module.exports = async (req, res) => {
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
-    const adminDoc = await db.collection('admins').doc(decoded.uid).get();
-    if (!adminDoc.exists) { res.status(403).json({ ok: false, erro: 'sem permissao' }); return; }
+    const adm = await conferirAdmin(db, decoded);
+    if (!adm.ok) { res.status(adm.status).json({ ok: false, erro: adm.erro === 'nao_admin' ? 'sem permissao' : adm.erro, mensagem: adm.mensagem }); return; }
 
     // 2) Carrega o parceiro.
     const parceiroRef  = db.collection('parceiros').doc(uid);

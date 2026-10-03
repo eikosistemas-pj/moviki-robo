@@ -1,4 +1,4 @@
-// versao 2026-09-25-a2 (teto do dia para a busca de endereco, todas as contas; freio de 120/h por conta)
+// versao 2026-10-03-freio2 (teto global falha aberta; freio por conta falha fechada) | base 2026-09-25-a2 (teto do dia para a busca de endereco, todas as contas; freio de 120/h por conta)
 // api/pontos.js  (repo: moviki-robo) | versao 2026-09-15-livesessao
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
 // O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
@@ -115,7 +115,7 @@ module.exports = async (req, res) => {
          e por conta, e conta nova e gratis: 10 contas de script passavam de 28 mil
          chamadas pagas por dia. Padrao 5.000/dia (env PLACES_TETO_DIA). */
       const tetoPlaces = Number(process.env.PLACES_TETO_DIA) > 0 ? Number(process.env.PLACES_TETO_DIA) : 5000;
-      if (!(await freioUid(admin, db, 'placesdia', 'global', tetoPlaces, 86400000))) {
+      if (!(await freioUid(admin, db, 'placesdia', 'global', tetoPlaces, 86400000, { falhaAberta: true }))) {
         res.status(429).json({ ok: false, erro: 'A busca de endereço está pausada por hoje. Tente de novo amanhã.', motivo: 'teto_global' });
         return;
       }

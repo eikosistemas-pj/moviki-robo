@@ -24,7 +24,7 @@ const vazio = { purchase: async () => {}, uidPorTokenWebhook: async () => '', we
 ['lib/ga.js', 'lib/meta.js', 'lib/checkout.js'].forEach((f) => {
   require.cache[require.resolve(path.join(ROBO, f))] = { id: f, filename: f, loaded: true, exports: vazio };
 });
-fake.admin.auth = () => ({ verifyIdToken: async (t) => ({ uid: t, email: t + '@x.com', email_verified: true }), getUser: async (u) => ({ emailVerified: true, email: u + '@x.com' }) });
+fake.admin.auth = () => ({ verifyIdToken: async (t) => ({ uid: t, email: t + '@x.com', email_verified: true, firebase: { sign_in_provider: 'google.com' } }), getUser: async (u) => ({ emailVerified: true, email: u + '@x.com' }) });
 
 const criar = require(path.join(ROBO, 'api/criar-assinatura.js'));
 const wh = require(path.join(ROBO, 'api/webhook.js'));

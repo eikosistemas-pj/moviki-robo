@@ -1,4 +1,4 @@
-// api/video-capa.js  (repo: moviki-robo)   ***ARQUIVO NOVO***
+// api/video-capa.js  (repo: moviki-robo) | versao 2026-10-03-capa2 (freio por conta; redirecionamento conferido a cada salto)
 //
 // ------------------------------------------------------------------
 // PARA QUE SERVE
@@ -28,7 +28,8 @@
 //
 // Env: FIREBASE_SERVICE_ACCOUNT (a mesma do upload-imagem.js).
 
-const { admin } = require('../lib/firebase');
+const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const STORAGE_BUCKET = 'moviki-app.firebasestorage.app';
@@ -56,17 +57,38 @@ function cdnDoTikTok(cru) {
   } catch (_) { return ''; }
 }
 
+/* 03/10/2026 (auditoria): com redirect 'follow' o filtro so olhava a
+   PRIMEIRA URL — um 301/302 levava o robo para qualquer endereco (SSRF).
+   Agora cada salto e conferido pelo mesmo filtro, no maximo 3 saltos. */
+function hostTikTokOuCdn(cru) {
+  try {
+    const u = new URL(String(cru || ''));
+    if (u.protocol !== 'https:') return '';
+    const h = u.hostname.toLowerCase();
+    return /(^|\.)(tiktok\.com|tiktokcdn[a-z0-9-]*\.com|ttwstatic\.com|byteimg\.com)$/.test(h) ? u.href : '';
+  } catch (_) { return ''; }
+}
+
 async function buscar(url, tipo) {
   const ctrl = new AbortController();
   const t = setTimeout(function () { ctrl.abort(); }, TEMPO_LIMITE_MS);
   try {
-    const r = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MovikiBot/1.0; +https://www.moviki.com.br)' },
-    });
-    if (!r.ok) return null;
-    return tipo === 'json' ? await r.json() : Buffer.from(await r.arrayBuffer());
+    let alvo = hostTikTokOuCdn(url);
+    for (let salto = 0; alvo && salto <= 3; salto++) {
+      const r = await fetch(alvo, {
+        signal: ctrl.signal,
+        redirect: 'manual',
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MovikiBot/1.0; +https://www.moviki.com.br)' },
+      });
+      if (r.status >= 300 && r.status < 400) {
+        const prox = r.headers.get('location');
+        alvo = prox ? hostTikTokOuCdn(new URL(prox, alvo).href) : '';
+        continue;
+      }
+      if (!r.ok) return null;
+      return tipo === 'json' ? await r.json() : Buffer.from(await r.arrayBuffer());
+    }
+    return null;
   } catch (_) { return null; }
   finally { clearTimeout(t); }
 }
@@ -98,6 +120,13 @@ module.exports = async (req, res) => {
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
+
+    /* 03/10/2026 (auditoria): sem freio, qualquer conta gratis gravava sem
+       limite em capas/{uid}/ (publico, cache de 1 ano) — a mesma hospedagem
+       gratis que o upload-imagem.js fechou em 23/09. 30 capas por hora. */
+    if (!(await freioUid(admin, db, 'capa', decoded.uid, 30, 3600000))) {
+      res.status(200).json({ ok: false, erro: 'sem_capa', motivo: 'freio' }); return;
+    }
 
     const j = await buscar('https://www.tiktok.com/oembed?url=' + encodeURIComponent(alvo), 'json');
     const thumb = j && cdnDoTikTok(j.thumbnail_url);

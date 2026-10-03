@@ -37,5 +37,5 @@ const db={ collection:(n)=>new ColRef(n), doc:(p)=>new DocRef(p), batch(){ const
       const tx={ async get(r){ if(escreveu)throw new Error('leitura depois de escrita na transacao'); return new Snap(r);},
         set(r,d,o){escreveu=true;writes.push(()=>applySet(r.path,d,o));}, update(r,d){escreveu=true;writes.push(()=>applyUpdate(r.path,d));}, delete(r){escreveu=true;writes.push(()=>store.delete(r.path));} };
       const out=await fn(tx); const snap=new Map(store); try{ writes.forEach(w=>w()); }catch(e){ store.clear(); for(const [k,v] of snap)store.set(k,v); throw e; } return out; } } };
-const admin={ firestore:Object.assign(()=>db,{FieldValue,Timestamp}), auth:()=>({getUser:async()=>{throw new Error('sem auth');},verifyIdToken:async(t)=>({uid:t})}), storage:()=>({bucket:()=>({})}) };
+const admin={ firestore:Object.assign(()=>db,{FieldValue,Timestamp}), auth:()=>({getUser:async()=>{throw new Error('sem auth');},verifyIdToken:async(t)=>({uid:t,firebase:{sign_in_provider:'google.com'}})}), storage:()=>({bucket:()=>({})}) };
 module.exports={admin,db,store,Timestamp};
