@@ -1,5 +1,5 @@
-// api/exclusoes.js | versao 2026-10-03-admingoogle (acao de dono so com sessao do Google)  (repo: moviki-robo)
-// anterior: 2026-09-23-exclusao4
+// api/exclusoes.js | versao 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos)  (repo: moviki-robo)
+// anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
 // Painel do dono -> Exclusoes. Dois modos (campo "action"):
 //   - "listar":  devolve os pedidos de exclusao pendentes (status 'solicitado').
@@ -70,6 +70,8 @@ const DOCS_POR_UID = [
   'assinaturas', 'indicacoes', 'avisos_cliente', 'recebimento',
   'live_sessoes', 'live_cota', 'live_throttle', 'live_bloqueios',
   'checkout_publico', 'checkout_contas', 'vik_memoria', 'vik_reserva',
+  // 03/10/2026 (P70): chaves de recurso e o freio dos avisos da Lista VIP
+  'recursos', 'vip_avisos',
 ];
 
 // Colecoes de topo que guardam o uid do lojista num CAMPO.
@@ -80,6 +82,8 @@ const COLECOES_POR_CAMPO = [
   { colecao: 'moderacao', campo: 'lojistaUid' },
   // 23/09 (rodada 3): pecas do criador (o documento aponta para os arquivos apagados acima)
   { colecao: 'criador_pecas', campo: 'uid' },
+  // 03/10/2026 (P70 etapa 4): Lista VIP — nome, e-mail e WhatsApp de quem pediu aviso da loja
+  { colecao: 'vip', campo: 'lojistaUid' },
 ];
 
 const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
