@@ -20,5 +20,13 @@
       "path": "/api/regras",
       "schedule": "10 * * * *"
     }
-  ]
+  ],
+  "functions": {
+    "api/financeiro.js": {
+      "maxDuration": 60
+    },
+    "api/pontos.js": {
+      "maxDuration": 60
+    }
+  }
 }
