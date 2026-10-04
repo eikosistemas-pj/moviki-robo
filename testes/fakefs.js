@@ -28,7 +28,7 @@ function cmp(a,b){ const va=a instanceof Timestamp?a.toMillis():a, vb=b instance
 class Query{ constructor(col,filters,lim,ord){this.col=col;this.f=filters||[];this.l=lim;this.o=ord;}
   where(f,op,v){return new Query(this.col,this.f.concat([[f,op,v]]),this.l,this.o);} limit(n){return new Query(this.col,this.f,n,this.o);} orderBy(f){return new Query(this.col,this.f,this.l,f);}
   async get(){ const pre=this.col+'/'; let docs=[]; for(const [p,d] of store){ if(!p.startsWith(pre)||p.slice(pre.length).includes('/'))continue;
-      let ok=true; for(const [f,op,v] of this.f){ const x=getPath(d,f); if(x===undefined){ok=false;break;} const c=cmp(x,v); if(op==='=='&&c!==0)ok=false; if(op==='<='&&c>0)ok=false; if(op==='>'&&c<=0)ok=false; if(op==='>='&&c<0)ok=false; if(op==='<'&&c>=0)ok=false; if(op==='in'&&v.indexOf(x)<0)ok=false; if(!ok)break;}
+      let ok=true; for(const [f,op,v] of this.f){ const x=getPath(d,f); if(x===undefined){ok=false;break;} const c=cmp(x,v); if(op==='=='&&c!==0)ok=false; if(op==='<='&&c>0)ok=false; if(op==='>'&&c<=0)ok=false; if(op==='>='&&c<0)ok=false; if(op==='<'&&c>=0)ok=false; if(op==='in'&&v.indexOf(x)<0)ok=false; if(op==='array-contains'&&!(Array.isArray(x)&&x.indexOf(v)>=0))ok=false; if(!ok)break;}
       if(ok)docs.push(new Snap(new DocRef(p))); }
     if(this.o)docs.sort((a,b)=>cmp(getPath(a.data(),this.o),getPath(b.data(),this.o)));
     if(this.l)docs=docs.slice(0,this.l); return {size:docs.length,docs,empty:!docs.length,forEach:(fn)=>docs.forEach(fn)}; } }
