@@ -1,4 +1,4 @@
-// api/novo-cliente.js  (repo: moviki-robo)
+// api/novo-cliente.js  (repo: moviki-robo)  | 06/10/2026 plano 2.6
 // Avisa o dono no Telegram quando um COMERCIANTE (lojista) cria conta no app.
 // Mesmo padrão do novo-parceiro.js. Segurança: confere o ID token do próprio
 // usuário recém-cadastrado (Admin SDK). Idempotente: grava avisos_cliente/{uid}
@@ -38,6 +38,7 @@
 // -------------------------------------------------------------------------
 
 const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');   // 06/10 (plano 2.6)
 const meta = require('../lib/meta');
 
 const ORIGIN_OK   = 'https://app.moviki.com.br';
@@ -74,6 +75,9 @@ module.exports = async (req, res) => {
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(200).json({ ok: false }); return; } // token inválido: ignora em silêncio
     const uid   = decoded.uid;
+    /* 06/10 (plano 2.6): freio por conta. Idempotente por uid, mas cada chamada
+       gasta Telegram e Meta; em laco, derrubaria o aviso dos cadastros reais. */
+    if (!(await freioUid(admin, db, 'novocliente', uid, 5, 3600000))) { res.status(429).json({ ok: false, motivo: 'freio' }); return; }
     const email = String(decoded.email || '').trim();
 
     // 2) Idempotência: um aviso por conta.

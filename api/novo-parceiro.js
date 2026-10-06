@@ -1,4 +1,4 @@
-// api/novo-parceiro.js | versao 2026-10-03-segredo (CRON_SECRET comparado em tempo constante)  (repo: moviki-robo)
+// api/novo-parceiro.js | versao 2026-10-03-segredo (CRON_SECRET comparado em tempo constante)  (repo: moviki-robo)  | 06/10/2026 plano 2.6
 // api/novo-parceiro.js  (repo: moviki-robo)
 //
 // Tem TRÊS papéis nesse arquivo (consolidados aqui de propósito — o plano
@@ -44,6 +44,7 @@
 //                               devolve "sem_config" e o quiz segue sem cartão.
 
 const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');   // 06/10 (plano 2.6)
 const { bearerConfere } = require('../lib/segredo');
 const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { buscarPerfil } = require('../lib/instagram');
@@ -257,6 +258,7 @@ async function atualizarEspelho(req, res) {
     let decoded;
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(200).json({ ok: false }); return; }
+    if (!(await freioUid(admin, db, 'novoparceiro', decoded.uid, 10, 3600000))) { res.status(429).json({ ok: false, motivo: 'freio' }); return; }   // 06/10 (2.6)
 
     const r = await espelharPorUid(admin, db, decoded.uid);
 
@@ -379,6 +381,7 @@ module.exports = async (req, res) => {
     try { decoded = await admin.auth().verifyIdToken(idToken); }
     catch (_) { res.status(200).json({ ok: false }); return; } // token inválido: ignora em silêncio
     if (decoded.uid !== uid) { res.status(200).json({ ok: false }); return; }
+    if (!(await freioUid(admin, db, 'novoparceiro', uid, 10, 3600000))) { res.status(429).json({ ok: false, motivo: 'freio' }); return; }   // 06/10 (2.6)
 
     // 2) Confere no Firestore (Admin SDK) que existe MESMO um parceiro pendente.
     const parceiroRef = db.collection('parceiros').doc(uid);

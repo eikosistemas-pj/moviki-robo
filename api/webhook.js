@@ -1,4 +1,4 @@
-// versao 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)
+// versao 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)  | 06/10/2026 plano 2.6
 // anterior: 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
 // anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
@@ -335,6 +335,19 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
     console.warn('comissao: auto-indicacao barrada', lojistaUid, slug1);
     return;
   }
+  /* INDICACAO TARDIA — 06/10/2026 (plano 2.6, pendencia da P68). A regra do
+     Firestore deixa o lojista gravar indicacoes/{uid} a qualquer momento, uma
+     vez. Um lojista antigo gravava a indicacao meses depois, combinado com um
+     parceiro, e passava a render 15% para ele. A indicacao so vale se foi
+     criada ate 7 dias depois da CONTA do lojista (hora do Auth). */
+  try {
+    const u = await admin.auth().getUser(lojistaUid);
+    const contaMs = u && u.metadata && u.metadata.creationTime ? Date.parse(u.metadata.creationTime) : 0;
+    if (contaMs && indMs && indMs > contaMs + 7 * 86400000) {
+      console.warn('comissao: indicacao criada ' + Math.round((indMs - contaMs) / 86400000) + ' dias depois da conta, ignorada', lojistaUid, slug1);
+      return;
+    }
+  } catch (e) { console.warn('comissao: nao consegui ler a conta no Auth', lojistaUid, e && e.message); }
   if (p1 && p1.data.status === 'aprovado' && await parceiroPodeGanhar(p1.uid)) {
     // Nível do parceiro NESTE pagamento (conta o cliente que está pagando agora).
     // O percentual aplicado é o do nível no momento em que a mensalidade entra;
