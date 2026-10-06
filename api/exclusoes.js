@@ -1,4 +1,4 @@
-// api/exclusoes.js | versao 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos)  (repo: moviki-robo)  | 06/10/2026 plano 3.4 (aviso de exclusao)
 // anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
 // Painel do dono -> Exclusoes. Dois modos (campo "action"):
@@ -416,6 +416,14 @@ module.exports = async (req, res) => {
         try { await admin.auth().updateUser(uid, { disabled: true }); resumo.authDesativado = true; }
         catch (_) {}
       }
+      /* 06/10 (plano 3.4): toda exclusao feita pelo painel do dono avisa no
+         Telegram na hora. Conta de dono tomada apagaria lojistas em silencio.
+         Best-effort: nao segura a exclusao. */
+      try {
+        const T = process.env.TELEGRAM_TOKEN, C = process.env.TELEGRAM_CHAT_ID;
+        if (T && C) await fetch('https://api.telegram.org/bot' + T + '/sendMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: C, text: '🗑 Conta EXCLUIDA pelo painel do dono\nuid: ' + uid + '\nFeito por: ' + decoded.uid + '\nSe nao foi voce, e invasao da conta do dono.' }) });
+      } catch (_) {}
 
       // 9) Fecha o pedido guardando um registro minimo (sem dados pessoais).
       await db.collection('exclusoes').doc(uid).set({
