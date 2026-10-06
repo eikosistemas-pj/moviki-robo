@@ -4,6 +4,6 @@
   "private": true,
   "description": "Robo de cobranca do Moviki: cria assinaturas no Asaas e libera/bloqueia o plano no Firebase.",
   "dependencies": {
-    "firebase-admin": "^12.7.0"
+    "firebase-admin": "12.7.0"
   }
 }

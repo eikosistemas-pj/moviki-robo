@@ -36,7 +36,8 @@ module.exports = async (req, res) => {
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     let decoded;
-    try { decoded = await admin.auth().verifyIdToken(String(body.idToken || '')); }
+    /* 06/10 (plano 2.3): checkRevoked=true. Sessao cancelada (senha trocada, conta desativada pela Guarda, revogada no console) e recusada na hora, em vez de valer ate 1 h. Custa 1 leitura do Auth por chamada; so nas portas de dinheiro e de dono. */
+    try { decoded = await admin.auth().verifyIdToken(String(body.idToken || ''), true); }
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao' }); return; }
     const adm = await conferirAdmin(db, decoded);
     if (!adm.ok) { res.status(adm.status).json({ ok: false, erro: adm.erro, mensagem: adm.mensagem }); return; }
