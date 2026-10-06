@@ -1,4 +1,5 @@
-// api/pagar-saque.js | versao 2026-10-03-admingoogle (acao de dono so com sessao do Google)  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-10-06-pixrecente (alerta de Pix trocado ha pouco)  (repo: moviki-robo)
+// anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // anterior: 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)
 // anterior: 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')
 // Paga comissão de parceiro por Pix. Só ADMIN (documento em /admins/{uid}) —
@@ -495,9 +496,19 @@ module.exports = async (req, res) => {
 
     // ---------- etapa CONFERIR: só devolve para o dono conferir ----------
     if (etapa === 'conferir') {
+      /* 06/10 (plano 1.3): se a chave Pix do parceiro foi trocada nas ultimas
+         48 h, avisa o dono para conferir antes de pagar — conta tomada troca o
+         Pix e saca. pixAtualizadoEm e gravado pela regra v33 quando o campo pix
+         muda; parceiro antigo sem o carimbo nao dispara o alerta. */
+      let alertaPix = '';
+      const tPix = parceiro.pixAtualizadoEm && typeof parceiro.pixAtualizadoEm.toMillis === 'function' ? parceiro.pixAtualizadoEm.toMillis() : 0;
+      if (tPix && (Date.now() - tPix) < 48 * 3600000) {
+        const horas = Math.max(1, Math.round((Date.now() - tPix) / 3600000));
+        alertaPix = 'Atencao: este parceiro trocou a chave Pix ha ' + horas + ' h. Confirme com ele por outro canal antes de pagar.';
+      }
       res.status(200).json({
         ok: true, etapa: 'conferir', valor: valor, qtd: sel.escolhidas.length,
-        chave: dados.chave, tipoChave: dados.tipo,
+        chave: dados.chave, tipoChave: dados.tipo, alertaPix: alertaPix,
         titular: dados.titular, documento: dados.documento, banco: dados.banco,
         parceiro: parceiro.nome || '', avulso: avulso,
       });
