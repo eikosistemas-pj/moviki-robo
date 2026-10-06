@@ -176,7 +176,8 @@ module.exports = async function criarAssinatura(req, res) {
     const authz = req.headers.authorization || '';
     const idToken = authz.startsWith('Bearer ') ? authz.slice(7) : null;
     if (!idToken) return res.status(401).json({ erro: 'Faca login para assinar.' });
-    const decoded = await admin.auth().verifyIdToken(idToken);
+    /* 06/10 (plano 2.3): checkRevoked=true. Sessao cancelada (senha trocada, conta desativada pela Guarda, revogada no console) e recusada na hora, em vez de valer ate 1 h. Custa 1 leitura do Auth por chamada; so nas portas de dinheiro e de dono. */
+    const decoded = await admin.auth().verifyIdToken(idToken, true);
     const uid = decoded.uid;
     const email = decoded.email || (req.body && req.body.email) || undefined;
 
