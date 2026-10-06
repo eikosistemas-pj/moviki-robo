@@ -19,6 +19,10 @@
     {
       "path": "/api/regras",
       "schedule": "10 * * * *"
+    },
+    {
+      "path": "/api/backup",
+      "schedule": "0 6 * * 1"
     }
   ],
   "functions": {
@@ -26,6 +30,9 @@
       "maxDuration": 60
     },
     "api/pontos.js": {
+      "maxDuration": 60
+    },
+    "api/backup.js": {
       "maxDuration": 60
     }
   }

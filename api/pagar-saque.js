@@ -1,4 +1,4 @@
-// api/pagar-saque.js | versao 2026-10-06-revogada (checkRevoked) | antes 2026-10-06-pixrecente (alerta de Pix trocado ha pouco)  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-10-06-alarme (aviso de saque no Telegram) | antes 2026-10-06-revogada (alerta de Pix trocado ha pouco)  (repo: moviki-robo)
 // anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // anterior: 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)
 // anterior: 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')
@@ -495,21 +495,25 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // ---------- etapa CONFERIR: só devolve para o dono conferir ----------
-    if (etapa === 'conferir') {
-      /* 06/10 (plano 1.3): se a chave Pix do parceiro foi trocada nas ultimas
-         48 h, avisa o dono para conferir antes de pagar — conta tomada troca o
-         Pix e saca. pixAtualizadoEm e gravado pela regra v33 quando o campo pix
-         muda; parceiro antigo sem o carimbo nao dispara o alerta. */
-      let alertaPix = '';
+    /* 06/10 (plano 1.3): se a chave Pix do parceiro foi trocada nas ultimas
+       48 h, avisa o dono para conferir antes de pagar — conta tomada troca o
+       Pix e saca. pixAtualizadoEm e gravado pela regra v33 quando o campo pix
+       muda; parceiro antigo sem o carimbo nao dispara o alerta. Calculado aqui
+       para servir a tela de conferir E o aviso do Telegram (3.4). */
+    let alertaPixSaque = '';
+    {
       const tPix = parceiro.pixAtualizadoEm && typeof parceiro.pixAtualizadoEm.toMillis === 'function' ? parceiro.pixAtualizadoEm.toMillis() : 0;
       if (tPix && (Date.now() - tPix) < 48 * 3600000) {
         const horas = Math.max(1, Math.round((Date.now() - tPix) / 3600000));
-        alertaPix = 'Atencao: este parceiro trocou a chave Pix ha ' + horas + ' h. Confirme com ele por outro canal antes de pagar.';
+        alertaPixSaque = 'Atencao: este parceiro trocou a chave Pix ha ' + horas + ' h. Confirme com ele por outro canal antes de pagar.';
       }
+    }
+
+    // ---------- etapa CONFERIR: só devolve para o dono conferir ----------
+    if (etapa === 'conferir') {
       res.status(200).json({
         ok: true, etapa: 'conferir', valor: valor, qtd: sel.escolhidas.length,
-        chave: dados.chave, tipoChave: dados.tipo, alertaPix: alertaPix,
+        chave: dados.chave, tipoChave: dados.tipo, alertaPix: alertaPixSaque,
         titular: dados.titular, documento: dados.documento, banco: dados.banco,
         parceiro: parceiro.nome || '', avulso: avulso,
       });
@@ -595,6 +599,16 @@ module.exports = async (req, res) => {
 
     // Manda o Pix. externalReference = id do saque (rastreia lá no Asaas e
     // serve de trava: o Asaas recusa uma segunda transferência com o mesmo).
+    /* 06/10 (plano 3.4): todo Pix de saque que sai avisa no Telegram, com
+       destaque acima de R$ 300. E o rastro em tempo real de dinheiro saindo da
+       conta do Moviki: se um dia um saque sair que o Paulo nao reconheca, ele
+       sabe no mesmo minuto. Best-effort: nunca segura o Pix. */
+    const avisoSaque = (txt) => {
+      const T = process.env.TELEGRAM_TOKEN, C = process.env.TELEGRAM_CHAT_ID;
+      if (!T || !C) return Promise.resolve();
+      return fetch('https://api.telegram.org/bot' + T + '/sendMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: C, text: txt, disable_web_page_preview: true }) }).catch(() => {});
+    };
     let transf;
     try {
       transf = await asaas('/transfers', 'POST', {
@@ -605,6 +619,9 @@ module.exports = async (req, res) => {
         description: 'Moviki - comissao de parceiro',
         externalReference: saqueRef.id,
       });
+      await avisoSaque((valor > 300 ? '🚨 SAQUE ALTO' : '💸 Saque') + ' de parceiro: R$ ' + valor.toFixed(2).replace('.', ',') +
+        '\nParceiro: ' + (parceiro.slug || parceiroUid) + '\nChave: ' + String(dados.chave || '').slice(0, 6) + '…' +
+        (alertaPixSaque ? '\n⚠ ' + alertaPixSaque : '') + '\nSe nao foi voce, e invasao da conta do dono.');
     } catch (err) {
       // "Saque X já solicitado" = a transferência JÁ EXISTE lá (a 1ª tentativa
       // chegou, só a resposta que se perdeu). Nesse caso o dinheiro pode ter
