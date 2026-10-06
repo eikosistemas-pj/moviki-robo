@@ -1,4 +1,4 @@
-// versao 2026-10-03-freio2 (teto global falha aberta; freio por conta falha fechada) | base 2026-09-25-a2 (teto do dia para a busca de endereco, todas as contas; freio de 120/h por conta)
+// versao 2026-10-03-freio2 (teto global falha aberta; freio por conta falha fechada) | base 2026-09-25-a2 (teto do dia para a busca de endereco, todas as contas; freio de 120/h por conta)  | 06/10/2026 plano 2.6
 // api/pontos.js  (repo: moviki-robo) | versao 2026-09-15-livesessao
 // Gerencia os PONTOS de um negócio Enterprise (multi-ponto).
 // O negócio principal já É 1 ponto. Dos 3 inclusos, sobram 2 na subcoleção sem
@@ -94,6 +94,12 @@ module.exports = async (req, res) => {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const idToken = String(body.idToken || '');
     const acao = String(body.acao || '');
+    /* 06/10 (plano 2.6, pendencia da P68): acao de lojista (loja_*) e de dono
+       (adm_*) so entram pela origem do painel. O site so tem o que fazer com
+       compra_* (checkout do comprador). Antes, esta porta aceitava loja_/adm_
+       com Origin do site, contornando a trava de origem do financeiro.js.
+       Sem Origin (fora do navegador) passa: quem protege ali e o idToken. */
+    if (/^(loja|adm)_/.test(acao) && _orig && _orig !== ORIGIN_OK) { res.status(403).json({ ok: false, erro: 'origem' }); return; }
     if (checkout.ehAcao(acao)) { await checkout.tratar(req, res, body); return; }
     if (livesessao.ehAcao(acao)) { await livesessao.tratar(req, res, body); return; }
     if (!idToken) { res.status(400).json({ ok: false, erro: 'faltam dados' }); return; }

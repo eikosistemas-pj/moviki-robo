@@ -1,4 +1,4 @@
-// api/excluir-conta.js  (repo: moviki-robo)
+// api/excluir-conta.js  (repo: moviki-robo)  | 06/10/2026 plano 2.6
 // Registra um PEDIDO de exclusão de conta feito pelo lojista dentro do app.
 // Modelo escolhido: SOLICITAÇÃO — o pedido é registrado, o dono é avisado no
 // Telegram e o usuário recebe um e-mail de confirmação. A exclusão de fato
@@ -13,6 +13,7 @@
 //   RESEND_API_KEY                    -> e-mail de confirmação pro usuário (opcional)
 
 const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');   // 06/10 (plano 2.6)
 
 const ORIGIN_OK   = 'https://app.moviki.com.br';
 const EMAIL_FROM  = 'Moviki <suporte@moviki.com.br>';
@@ -39,6 +40,8 @@ module.exports = async (req, res) => {
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao invalida' }); return; }
     const uid   = decoded.uid;
     const email = String(decoded.email || '').trim();
+    /* 06/10 (plano 2.6): freio por conta — 3 pedidos de exclusao por dia bastam. */
+    if (!(await freioUid(admin, db, 'excluirconta', uid, 3, 86400000))) { res.status(429).json({ ok: false, erro: 'freio', mensagem: 'Muitos pedidos seguidos. Tente de novo mais tarde.' }); return; }
 
     // 2) Nome do negócio (só pra facilitar sua vida no aviso) — opcional.
     let nome = '';
