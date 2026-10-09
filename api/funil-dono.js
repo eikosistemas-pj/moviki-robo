@@ -1,4 +1,4 @@
-// api/funil-dono.js | versao 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
+// api/funil-dono.js | versao 2026-10-09-origem (funil por origem do cadastro) | antes 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
 // FUNIL DO LOJISTA — P75, fase 1 (peca B5), 07/10/2026.
 //
 // O painel do dono (cartao "Funil do lojista", na Visao geral) mostra, semana
@@ -33,14 +33,21 @@
 // dono achar a conta (o uid vai, porque o painel do dono ja o mostra em
 // Negocios e em Exclusoes).
 //
+// 09/10/2026 — POR ORIGEM: cada cadastro traz o canal gravado pelo
+// api/novo-cliente.js (avisos_cliente/{uid}.origem, lib/origem.js). O cartao
+// ganha a tabela "De onde vem o lojista": cadastros, teste, 1a live e pagante
+// por canal, nas mesmas 6 semanas. Cadastro antigo sem o campo vira "Anuncio
+// Meta" (se tinha origemAnuncio) ou "Antes de 09/10 (sem registro)".
+//
 // CUSTO: 1 consulta (cadastros dos ultimos 60 dias, teto 1.500) + 5 leituras
 // por cadastro em lote (db.getAll em blocos de 100) + a lista de admins.
 
 const { admin, db } = require('../lib/firebase');
 const { conferirAdmin } = require('../lib/admin');
 const { freioUid } = require('../lib/freio');
+const { origemDoAviso } = require('../lib/origem');
 
-const VERSAO = '2026-10-08-confirma1';
+const VERSAO = '2026-10-09-origem';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
 /* ----------------------------------------------------------------------
@@ -125,6 +132,7 @@ function montarFunil(contas, admins, agora) {
     semanas.push(Object.assign({ inicio: ini, rotulo: rotulo(ini) + ' a ' + rotulo(ini + 6 * DIA) }, vazio()));
   }
   const total = vazio();
+  const porCanal = {};   // 09/10: canal -> { canal, rotulo, cadastros, teste, live, live48, pagante }
   let fora = 0, liveSemData = 0;
   const linhas = [];
 
@@ -151,6 +159,7 @@ function montarFunil(contas, admins, agora) {
       email: mascara(c.email),
       cadastroEm: c.cadastroEm,
       anuncio: c.anuncio === true,
+      origem: c.origem || { canal: 'sem_registro', rotulo: 'Antes de 09/10 (sem registro)', campaign: '' },
       emailConfirmado: c.emailVerificado == null ? null : c.emailVerificado === true,
       lembretesConfirma: Number(c.lembretesConfirma) || 0,   // 08/10: lembretes de confirmar o e-mail ja enviados (0 a 2)
       teste,
@@ -180,6 +189,13 @@ function montarFunil(contas, admins, agora) {
       if (pagante) alvo.pagante++;
       if (maduro) { alvo.maduros++; if (live48) alvo.live48Maduros++; }
     }
+    const o = r.origem;
+    const pc = porCanal[o.canal] || (porCanal[o.canal] = { canal: o.canal, rotulo: o.rotulo, cadastros: 0, teste: 0, live: 0, live48: 0, pagante: 0 });
+    pc.cadastros++;
+    if (teste) pc.teste++;
+    if (fezLive) pc.live++;
+    if (live48) pc.live48++;
+    if (pagante) pc.pagante++;
   }
 
   linhas.sort((x, y) => y.cadastroEm - x.cadastroEm);
@@ -194,6 +210,7 @@ function montarFunil(contas, admins, agora) {
       maduros: total.maduros, live48Maduros: total.live48Maduros, taxaMaduros: taxa(total.live48Maduros, total.maduros),
       meta: META_NORTE,
     },
+    porOrigem: Object.keys(porCanal).map((k) => porCanal[k]).sort((a, b) => (b.cadastros - a.cadastros) || (b.pagante - a.pagante)),
     recentes: linhas.slice(0, 20),
     contasTesteFora: fora,
     liveSemData,
@@ -232,7 +249,7 @@ async function gerar(agora) {
   const base = [];
   qs.forEach((d) => {
     const x = d.data() || {};
-    base.push({ uid: d.id, cadastroEm: msDe(x.avisadoEm), anuncio: x.origemAnuncio === true, email: x.email || '', nomeAviso: x.nome || '',
+    base.push({ uid: d.id, cadastroEm: msDe(x.avisadoEm), anuncio: x.origemAnuncio === true, origem: origemDoAviso(x), email: x.email || '', nomeAviso: x.nome || '',
       lembretesConfirma: Object.keys(x.confirmaLembretes || {}).length });
   });
   const uids = base.map((b) => b.uid);
