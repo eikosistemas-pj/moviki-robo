@@ -38,6 +38,13 @@ function resFalso() { const r = { code: 0, body: null }; r.status = (c) => { r.c
   conf(c({ ref: 'https://l.instagram.com/?u=x' }) === 'instagram', 'referrer do Instagram = organico');
   conf(c({ utm: 'utm_source=instagram&utm_medium=bio' }) === 'instagram', 'bio do Instagram = organico');
   conf(c({ ref: 'm.facebook.com' }) === 'facebook', 'Facebook organico');
+  conf(c({ utm: 'utm_source=tiktok&utm_medium=dm&utm_campaign=comente-live' }) === 'direct_tiktok', 'ManyChat do TikTok = direct do TikTok');
+  conf(c({ origemUrl: 'https://app.moviki.com.br/?criar=1&ttclid=E.abc' }) === 'anuncio_tiktok', 'ttclid = anuncio TikTok');
+  conf(c({ utm: 'utm_source=tiktok&utm_medium=paid' }) === 'anuncio_tiktok', 'tiktok pago = anuncio TikTok');
+  conf(c({ utm: 'utm_source=tiktok&utm_medium=bio' }) === 'tiktok', 'bio do TikTok = organico');
+  conf(c({ ref: 'https://www.tiktok.com/@moviki.oficial' }) === 'tiktok', 'referrer do TikTok = organico');
+  conf(c({ utm: 'utm_source=tiktok&utm_medium=dm', parceiro: 'joaovende' }) === 'parceiro', 'parceiro ganha do TikTok');
+  conf(O.textoOrigem(O.classificarOrigem({ utm: 'utm_source=tiktok&utm_medium=dm&utm_campaign=comente-live' })) === 'Direct do TikTok (comente-live)', 'texto do aviso TikTok');
   conf(c({ utm: 'utm_source=whatsapp' }) === 'whatsapp', 'WhatsApp');
   conf(c({ ref: 'https://www.google.com.br/' }) === 'busca', 'busca organica');
   conf(c({ ref: 'https://www.moviki.com.br/aovivo' }) === 'site', 'site');
