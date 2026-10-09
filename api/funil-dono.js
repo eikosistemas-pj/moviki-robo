@@ -1,4 +1,4 @@
-// api/funil-dono.js | versao 2026-10-07-funil  (repo: moviki-robo)
+// api/funil-dono.js | versao 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
 // FUNIL DO LOJISTA — P75, fase 1 (peca B5), 07/10/2026.
 //
 // O painel do dono (cartao "Funil do lojista", na Visao geral) mostra, semana
@@ -40,7 +40,7 @@ const { admin, db } = require('../lib/firebase');
 const { conferirAdmin } = require('../lib/admin');
 const { freioUid } = require('../lib/freio');
 
-const VERSAO = '2026-10-07-funil';
+const VERSAO = '2026-10-08-confirma1';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
 /* ----------------------------------------------------------------------
@@ -152,6 +152,7 @@ function montarFunil(contas, admins, agora) {
       cadastroEm: c.cadastroEm,
       anuncio: c.anuncio === true,
       emailConfirmado: c.emailVerificado == null ? null : c.emailVerificado === true,
+      lembretesConfirma: Number(c.lembretesConfirma) || 0,   // 08/10: lembretes de confirmar o e-mail ja enviados (0 a 2)
       teste,
       ensaios: Number(m.ensaios) || (fezEnsaio ? 1 : 0),
       ensaioEm: ensaioEm || null,
@@ -231,7 +232,8 @@ async function gerar(agora) {
   const base = [];
   qs.forEach((d) => {
     const x = d.data() || {};
-    base.push({ uid: d.id, cadastroEm: msDe(x.avisadoEm), anuncio: x.origemAnuncio === true, email: x.email || '', nomeAviso: x.nome || '' });
+    base.push({ uid: d.id, cadastroEm: msDe(x.avisadoEm), anuncio: x.origemAnuncio === true, email: x.email || '', nomeAviso: x.nome || '',
+      lembretesConfirma: Object.keys(x.confirmaLembretes || {}).length });
   });
   const uids = base.map((b) => b.uid);
 
