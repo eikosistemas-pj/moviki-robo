@@ -187,6 +187,7 @@ As **regras do Firestore e do Storage** ficam versionadas em `moviki-app/firebas
 Regras da publicação:
 
 - Todo texto passa por `compliance.garantir()` antes de publicar. Sem exceção.
+- **Chamada "Comente LIVE" (08/10/2026):** primeira linha de toda legenda de feed e reel no **Instagram** (`config.CHAMADA_COMENTE`, desliga com `CHAMADA_COMENTE=0`); quem comenta cai no fluxo do ManyChat (seção 8). Facebook fica sem (não está ligado ao ManyChat). **Nunca** pôr "comente LIVE" na arte, na narração ou na legenda do Material de apoio: o parceiro posta a mesma peça no perfil dele, onde o comentário não dispara nada.
 - Texto reserva é obrigatório e precisa estar limpo. Falha de IA nunca fura o calendário: sai o texto reserva.
 - Instagram é prioridade; Facebook é best-effort e nunca derruba o ciclo.
 - Imagem não é gerada por IA na hora de publicar. **Desde 22/09/2026 feed, story e reel usam o banco do Material de apoio do parceiro**: `tipo: feed` → feed, `tipo: story` → story, `tipo: video` 9:16 de 3 a 90 s → reel. A peça vai ao ar como está, com a legenda convertida para a voz da marca (sai `#publi`, `{link}` vira link da bio). Peça com "link deste parceiro" impresso ou falado fica fora (`MATERIAL_EXCLUIR` no robô).
