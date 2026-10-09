@@ -1,4 +1,4 @@
-// versao 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -26,6 +26,23 @@
 //   continuam, porque sao sobre a conta.
 //   Roda 2x por dia (12h e 21h UTC) para o e-mail do dia 0 nao esperar 24 h.
 //
+// 08/10/2026 (P75, depois da fase 1) — TRES E-MAILS NOVOS:
+//   O cartao Funil do lojista mostrou que 4 de cada 10 cadastros param ANTES de
+//   confirmar o e-mail: sem confirmar nao ha teste gratis, nao ha assinaturas/{uid}
+//   e este robo nunca os enxergava.
+//   - conf1 / conf2: quem criou conta e nao confirmou o e-mail recebe um link
+//     NOVO de confirmacao (gerado pelo Admin SDK) — conf1 a partir de 3 h do
+//     cadastro, conf2 a partir de 24 h. Nunca mais de 2, nunca depois de 7 dias.
+//     Fonte: avisos_cliente/{uid} (o cadastro, gravado pelo novo-cliente.js);
+//     a marca fica em avisos_cliente/{uid}.confirmaLembretes.
+//   - novEnsaio (1 vez na vida): quem JA estava no teste antes de 09/10 ou e
+//     Premium/Enterprise e ainda nao fez live fica sabendo do ensaio (ninguem
+//     ve, nao gasta as lives). O ativ3 da sequencia passou a ser o e-mail do
+//     ensaio; quem recebe um nao recebe o outro.
+//   - volta (1 vez na vida): teste gratis acabou ha 2 a 45 dias e nao virou
+//     plano pago -> lembra que a conta continua e que a live segue no Premium.
+//   novEnsaio e volta respeitam o "nao quero mais dicas". Nenhum texto promete venda.
+//
 // Env no Vercel (moviki-robo): CRON_SECRET, RESEND_API_KEY, FIREBASE_SERVICE_ACCOUNT.
 // Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
 
@@ -42,6 +59,12 @@ const WPP_LINK   = 'https://wa.me/554120186848';
 const DIA_MS     = 86400000;
 const DIAS_TRIAL = 30;          // o mesmo do api/ativar-trial.js
 const ROBO_URL   = 'https://moviki-robo.vercel.app';
+const HORA_MS    = 3600000;
+/* 09/10/2026 00:00 em Brasilia: teste que comecou antes disso nao recebeu o
+   ativ3 com o ensaio, entao recebe a novidade uma vez. */
+const CORTE_NOVIDADE = Date.UTC(2026, 9, 9, 3, 0, 0);
+const CONFIRMA_JANELA_DIAS = 7;
+const PLANOS_LIVE = ['premium', 'enterprise'];
 
 /* Sequencia da primeira live: [chave, primeiro dia, ultimo dia]. Dentro da
    janela vale a etapa MAIS RECENTE ainda nao enviada — quem chega atrasado nao
@@ -114,6 +137,140 @@ async function jaFezLive(uid) {
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+const msDe = (t) => (t && typeof t.toMillis === 'function') ? t.toMillis() : (typeof t === 'number' ? t : 0);
+
+/* 08/10: qual e-mail cabe para esta assinatura agora? Funcao pura (testada em
+   testes/lembrete.test.js). Devolve { flag, dias, diaTeste } ou null.
+   Ordem de prioridade: avisos da conta (fim, d2, d7, pago) > sequencia da
+   primeira live > novidade do ensaio. "volta" so existe com o teste vencido. */
+function decidirFlag(d, agora) {
+  if (!d || d.gateway === 'paddle' || !d.vence_em || typeof d.vence_em.toMillis !== 'function') return null;
+  const vence = d.vence_em.toMillis();
+  const dias = Math.ceil((vence - agora) / DIA_MS);
+  const lembretes = d.lembretes || {};
+  const ehTrial = d.periodo === 'trial';
+  const querDicas = d.dicasParar !== true;
+
+  // Teste vencido ha 2 a 45 dias e que nao virou plano pago (periodo segue 'trial').
+  if (ehTrial && dias <= -2 && dias >= -45) {
+    return (!lembretes.volta && querDicas) ? { flag: 'volta', dias, diaTeste: 0 } : null;
+  }
+  if (d.ativo !== true) return null;
+
+  let flag = null;
+  if (ehTrial) {
+    if (dias <= 0 && !lembretes.fim)                  flag = 'fim';
+    else if (dias >= 1 && dias <= 2 && !lembretes.d2) flag = 'd2';
+    else if (dias >= 3 && dias <= 7 && !lembretes.d7) flag = 'd7';
+  } else {
+    const venceId = String(vence);
+    if (dias >= 0 && dias <= 5 && lembretes.pagoVence !== venceId) flag = 'pago';
+  }
+
+  let diaTeste = 0;
+  if (ehTrial) diaTeste = Math.floor((agora - (vence - DIAS_TRIAL * DIA_MS)) / DIA_MS);
+  if (!flag && ehTrial && dias >= 8 && querDicas) {
+    const etapa = ATIVACAO.find(e => diaTeste >= e[1] && diaTeste <= e[2] && !lembretes[e[0]]);
+    if (etapa) flag = etapa[0];
+  }
+  if (!flag && querDicas && !lembretes.novEnsaio) {
+    const iniTeste = vence - DIAS_TRIAL * DIA_MS;
+    if (ehTrial && dias >= 3 && diaTeste >= 3 && iniTeste < CORTE_NOVIDADE) flag = 'novEnsaio';
+    else if (!ehTrial && dias >= 0 && PLANOS_LIVE.indexOf(String(d.plano || '').toLowerCase().trim()) >= 0) flag = 'novEnsaio';
+  }
+  return flag ? { flag, dias, diaTeste } : null;
+}
+
+/* 08/10: lembrete de confirmar o e-mail. x = avisos_cliente/{uid}. */
+function decidirConfirma(x, agora) {
+  const em = msDe(x && x.avisadoEm);
+  if (!em) return null;
+  const idade = agora - em;
+  if (idade < 3 * HORA_MS || idade > CONFIRMA_JANELA_DIAS * DIA_MS) return null;
+  const l = (x && x.confirmaLembretes) || {};
+  if (idade >= 24 * HORA_MS) {
+    if (l.c2) return null;
+    if (l.c1 && (agora - msDe(l.c1)) < 12 * HORA_MS) return null;
+    return 'c2';
+  }
+  return l.c1 ? null : 'c1';
+}
+
+async function enviarResend(API_KEY, email, msg, parar) {
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign(
+      { from: EMAIL_FROM, to: [email], subject: msg.subject, html: msg.html, text: msg.text },
+      parar ? { headers: { 'List-Unsubscribe': '<' + parar + '>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } } : {}
+    )),
+  });
+  if (!r.ok) {
+    const det = await r.text().catch(() => '');
+    console.error('resend erro:', r.status, det);
+    return false;
+  }
+  return true;
+}
+
+/* 08/10: quem criou conta e nao confirmou o e-mail. Le avisos_cliente dos
+   ultimos 7 dias (um campo so na consulta = indice automatico), confere no
+   Auth quem continua sem confirmar e manda um link NOVO. Nada aqui derruba
+   os outros lembretes: o chamador engole o erro. */
+async function lembrarConfirmacao(enviarDeVerdade, API_KEY, agora) {
+  const out = { analisados: 0, enviados: 0, detalhes: [] };
+  const desde = admin.firestore.Timestamp.fromMillis(agora - CONFIRMA_JANELA_DIAS * DIA_MS);
+  const qs = await db.collection('avisos_cliente').where('avisadoEm', '>=', desde).get();
+  const cand = [];
+  qs.forEach((s) => {
+    out.analisados++;
+    const etapa = decidirConfirma(s.data() || {}, agora);
+    if (etapa) cand.push({ uid: s.id, ref: s.ref, etapa });
+  });
+  if (!cand.length) return out;
+
+  const usuarios = {};
+  for (let i = 0; i < cand.length; i += 100) {
+    const r = await admin.auth().getUsers(cand.slice(i, i + 100).map((c) => ({ uid: c.uid })));
+    (r.users || []).forEach((u) => { usuarios[u.uid] = u; });
+  }
+
+  for (const c of cand) {
+    const u = usuarios[c.uid];
+    const email = u ? String(u.email || '').trim() : '';
+    if (!u || u.disabled || !email) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'sem_conta' }); continue; }
+    if (u.emailVerified) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'ja_confirmou' }); continue; }
+
+    let neg = null;
+    try { const n = await db.collection('negocios').doc(c.uid).get(); if (n.exists) neg = n.data() || {}; } catch (_) {}
+    if (String((neg && neg.pais) || 'BR').toUpperCase() !== 'BR') { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'fora_do_brasil' }); continue; }
+    const nome = (neg && neg.nome) ? String(neg.nome).trim() : 'Olá';
+
+    if (!enviarDeVerdade) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, email: mascara(email), status: 'simulado' }); continue; }
+
+    let link = '';
+    try { link = await admin.auth().generateEmailVerificationLink(email, { url: PAINEL_URL + '/?confirmado=1' }); }
+    catch (_) {
+      try { link = await admin.auth().generateEmailVerificationLink(email); }
+      catch (e) { console.error('link de confirmacao erro:', c.uid, (e && e.message) || e); }
+    }
+    if (!link) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'sem_link' }); continue; }
+
+    try {
+      if (!(await enviarResend(API_KEY, email, montarConfirmacao(c.etapa, nome, link), ''))) {
+        out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'falha_envio' }); continue;
+      }
+      await c.ref.update({ ['confirmaLembretes.' + c.etapa]: admin.firestore.FieldValue.serverTimestamp() });
+      out.enviados++;
+      out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'enviado' });
+    } catch (e) {
+      console.error('confirmacao erro:', c.uid, e);
+      out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'erro' });
+    }
+  }
+  return out;
+}
+
 module.exports = async (req, res) => {
   try {
     // 07/10: descadastro das dicas. Vem do link do e-mail (GET) ou do botao
@@ -153,36 +310,14 @@ module.exports = async (req, res) => {
       const uid = docu.id;
       resultado.analisados++;
 
-      if (d.ativo !== true || !d.vence_em || typeof d.vence_em.toMillis !== 'function') { resultado.pulados++; continue; }
-      /* 05/10/2026: assinatura da Paddle (fora do Brasil) renova no cartao e a
-         Paddle manda os proprios avisos; este e-mail e em portugues e fala do Asaas. */
-      if (d.gateway === 'paddle') { resultado.pulados++; continue; }
-
-      const dias = Math.ceil((d.vence_em.toMillis() - agora) / DIA_MS);
-      const lembretes = d.lembretes || {};
-      const ehTrial = d.periodo === 'trial';
-
-      // Qual aviso cabe agora?
-      let flag = null;
-      if (ehTrial) {
-        if (dias <= 0 && !lembretes.fim)                  flag = 'fim';
-        else if (dias >= 1 && dias <= 2 && !lembretes.d2) flag = 'd2';
-        else if (dias >= 3 && dias <= 7 && !lembretes.d7) flag = 'd7';
-      } else {
-        // plano pago: 1 aviso por ciclo, reavisa quando o vencimento muda.
-        const venceId = String(d.vence_em.toMillis());
-        if (dias >= 0 && dias <= 5 && lembretes.pagoVence !== venceId) flag = 'pago';
-      }
-
-      /* 07/10 (P75): sem aviso de fim de teste hoje, ve se cabe um e-mail da
-         sequencia da primeira live. So no teste, so longe do fim (8+ dias). */
-      let diaTeste = 0;
-      if (!flag && ehTrial && dias >= 8 && d.dicasParar !== true) {
-        diaTeste = Math.floor((agora - (d.vence_em.toMillis() - DIAS_TRIAL * DIA_MS)) / DIA_MS);
-        const etapa = ATIVACAO.find(e => diaTeste >= e[1] && diaTeste <= e[2] && !lembretes[e[0]]);
-        if (etapa) flag = etapa[0];
-      }
-      if (!flag) { resultado.pulados++; continue; }
+      /* Qual aviso cabe agora? (decidirFlag, la em cima). 05/10/2026: Paddle
+         fica de fora — renova no cartao e a Paddle manda os proprios avisos.
+         07/10 (P75): sem aviso de fim de teste hoje, ve se cabe um e-mail da
+         sequencia da primeira live (so no teste, so longe do fim). 08/10:
+         novidade do ensaio e convite de volta. */
+      const dec = decidirFlag(d, agora);
+      if (!dec) { resultado.pulados++; continue; }
+      const { flag, dias, diaTeste } = dec;
 
       /* 05/10/2026: negocio de fora do Brasil fica sem lembrete ate o e-mail
          existir no idioma dele (Fase 2 do P73). Negocio sem pais = Brasil. */
@@ -190,9 +325,13 @@ module.exports = async (req, res) => {
       try { const n = await db.collection('negocios').doc(uid).get(); if (n.exists) negDados = n.data() || {}; } catch (_) {}
       if (String((negDados && negDados.pais) || 'BR').toUpperCase() !== 'BR') { resultado.pulados++; resultado.detalhes.push({ uid, flag, status: 'fora_do_brasil' }); continue; }
 
-      const ehAtivacao = flag.indexOf('ativ') === 0;
-      if (ehAtivacao) {
-        if (await jaFezLive(uid)) { resultado.pulados++; resultado.detalhes.push({ uid, flag, status: 'ja_fez_live' }); continue; }
+      const ehAtivacao = flag.indexOf('ativ') === 0 || flag === 'novEnsaio' || flag === 'volta';
+      if (ehAtivacao && flag !== 'volta') {
+        if (await jaFezLive(uid)) {
+          // novidade do ensaio: quem ja fez live nao precisa; marca para nao reler toda rodada.
+          if (flag === 'novEnsaio' && enviarDeVerdade) { try { await docu.ref.update({ 'lembretes.novEnsaio': 'pulado' }); } catch (_) {} }
+          resultado.pulados++; resultado.detalhes.push({ uid, flag, status: 'ja_fez_live' }); continue;
+        }
         // ativ1 so faz sentido com o cardapio vazio; com produto, pula a etapa.
         const temProduto = !!(negDados && Array.isArray(negDados.cardapio) && negDados.cardapio.length > 0);
         if (flag === 'ativ1' && temProduto) {
@@ -210,7 +349,8 @@ module.exports = async (req, res) => {
 
       const dic = Math.max(dias, 0);
       const parar = ehAtivacao ? linkParar(uid) : '';
-      const msg = ehAtivacao ? montarAtivacao(flag, nome, parar, dic, negDados && negDados.slug) : montarEmail(flag, nome, dic);
+      const ehPagoComLive = flag === 'novEnsaio' && d.periodo !== 'trial';
+      const msg = ehAtivacao ? montarAtivacao(flag, nome, parar, dic, negDados && negDados.slug, ehPagoComLive) : montarEmail(flag, nome, dic);
 
       if (!enviarDeVerdade) {
         resultado.detalhes.push({ uid, flag, dias, diaTeste, email: mascara(email), status: 'simulado' });
@@ -218,27 +358,22 @@ module.exports = async (req, res) => {
       }
 
       try {
-        const r = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify(Object.assign(
-            { from: EMAIL_FROM, to: [email], subject: msg.subject, html: msg.html, text: msg.text },
-            parar ? { headers: { 'List-Unsubscribe': '<' + parar + '>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } } : {}
-          )),
-        });
-        if (!r.ok) {
-          const det = await r.text().catch(() => '');
-          console.error('resend erro:', r.status, det);
+        if (!(await enviarResend(API_KEY, email, msg, parar))) {
           resultado.detalhes.push({ uid, flag, status: 'falha_envio' });
           continue;
         }
+        const TS = admin.firestore.FieldValue.serverTimestamp();
         if (flag === 'pago') {
           await docu.ref.update({
             'lembretes.pagoVence': String(d.vence_em.toMillis()),
-            'lembretes.pagoEm': admin.firestore.FieldValue.serverTimestamp(),
+            'lembretes.pagoEm': TS,
           });
         } else {
-          await docu.ref.update({ ['lembretes.' + flag]: admin.firestore.FieldValue.serverTimestamp() });
+          const marca = { ['lembretes.' + flag]: TS };
+          // 08/10: ativ3 e o e-mail do ensaio; novidade e ativ3 nunca saem os dois.
+          if (flag === 'ativ3') marca['lembretes.novEnsaio'] = 'via_ativ3';
+          if (flag === 'novEnsaio' && d.periodo === 'trial' && diaTeste <= 6) marca['lembretes.ativ3'] = 'via_novidade';
+          await docu.ref.update(marca);
         }
         resultado.enviados++;
         resultado.detalhes.push({ uid, flag, status: 'enviado' });
@@ -248,7 +383,13 @@ module.exports = async (req, res) => {
       }
     }
 
-    res.status(200).json({ ok: true, ...resultado, apelidos });
+    /* 08/10: lembrete de confirmar o e-mail (quem nao confirmou nao tem
+       assinaturas/{uid}, por isso nao passou pelo laco acima). */
+    let confirmacao = null;
+    try { confirmacao = await lembrarConfirmacao(enviarDeVerdade, API_KEY, agora); resultado.enviados += confirmacao.enviados; }
+    catch (e) { console.error('lembrarConfirmacao erro:', e); confirmacao = { erro: true }; }
+
+    res.status(200).json({ ok: true, ...resultado, confirmacao, apelidos });
   } catch (e) {
     console.error('lembrete erro:', e);
     res.status(500).json({ ok: false, erro: 'erro interno' });
@@ -363,7 +504,7 @@ function montarEmail(tipo, nome, dias) {
 /* 07/10/2026 (P75) — e-mails da primeira live. Regras: "teste grátis", nunca
    a palavra em inglês; nenhuma promessa de venda; rótulos iguais aos da tela
    (Fazer live, Entrar ao vivo, sacolinha); link de descadastro em todos. */
-function montarAtivacao(tipo, nome, parar, diasRestantes, slug) {
+function montarAtivacao(tipo, nome, parar, diasRestantes, slug, pago) {
   const slugOk = /^[a-z0-9_-]{3,40}$/i.test(String(slug || '')) ? String(slug) : '';
   const linkLive = slugOk ? ('https://www.moviki.com.br/live/' + slugOk) : '';
   let subject, titulo, paragrafos, passos = [], cta = 'Abrir meu painel →', extra = '';
@@ -379,6 +520,7 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug) {
       'Escolha até 5 produtos para a <b>sacolinha</b>.',
       'Toque em <b>Entrar ao vivo</b> e mande o link para os seus clientes no WhatsApp.',
     ];
+    extra = 'Quer treinar antes? No estúdio tem o botão "Fazer um ensaio": transmite de verdade, ninguém vê e não gasta as suas 2 lives.';
     cta = 'Fazer minha primeira live →';
   } else if (tipo === 'ativ1') {
     subject = 'Falta pouco para a sua primeira live';
@@ -388,14 +530,30 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug) {
       'A foto pode ser do próprio celular. Dá para ajustar o enquadramento na hora de enviar.',
     ];
     cta = 'Cadastrar meus produtos →';
-  } else if (tipo === 'ativ3') {
-    subject = 'Que tal uma live curta hoje?';
-    titulo  = 'Não precisa de roteiro';
+  } else if (tipo === 'ativ3' || tipo === 'novEnsaio') {
+    subject = tipo === 'novEnsaio' ? 'Novidade: ensaie sua live sem ninguém ver' : 'Ensaie sua live sem ninguém ver';
+    titulo  = 'Faça um ensaio antes';
     paragrafos = [
-      'Chame 2 ou 3 clientes de confiança, mostre um produto de cada vez e veja como fica do lado de quem assiste.',
-      'Cada live do teste pode durar até 1 hora. Se a conexão cair, reabra em até 15 minutos que continua sendo a mesma live.',
+      'No estúdio da live agora tem o botão "Fazer um ensaio". A live acontece de verdade, mas ninguém assiste: é só para você ver como fica, testar a luz, o som e os produtos.',
+      pago
+        ? 'O ensaio dura até 10 minutos e você pode fazer até 5 por dia.'
+        : 'O ensaio dura até 10 minutos, dá para fazer até 5 por dia e não gasta as 2 lives do seu teste grátis.',
     ];
-    cta = 'Fazer live agora →';
+    passos = [
+      'Abra o painel e toque em <b>Fazer live</b>.',
+      'Toque em <b>Fazer um ensaio</b>.',
+      'Quando se sentir pronto, chame 2 ou 3 clientes e toque em <b>Entrar ao vivo</b>.',
+    ];
+    cta = 'Fazer meu ensaio →';
+  } else if (tipo === 'volta') {
+    subject = 'Sua conta no Moviki continua aqui';
+    titulo  = 'Seu teste acabou, sua conta não';
+    paragrafos = [
+      'Seu link e o que você montou continuam no ar no plano Básico. Nada foi apagado.',
+      'Para voltar a fazer live, o plano é o Premium (R$ 69,90/mês). E agora dá para fazer um ensaio antes de entrar ao vivo: ninguém vê, só você.',
+      'Se alguma coisa atrapalhou no teste, responda este e-mail ou chame a gente no WhatsApp e conte o que foi.',
+    ];
+    cta = 'Ver os planos →';
   } else if (tipo === 'ativ7') {
     subject = 'Quem vai assistir à sua live?';
     titulo  = 'Os clientes que você já tem';
@@ -408,7 +566,7 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug) {
     subject = 'Suas lives grátis ainda estão aqui';
     titulo  = 'Ainda dá tempo';
     paragrafos = [
-      'Faltam ' + diasRestantes + ' dias do seu teste grátis e as suas 2 lives continuam disponíveis.',
+      'Faltam ' + diasRestantes + ' dias do seu teste grátis e as suas 2 lives continuam disponíveis. Se quiser treinar antes, o ensaio não gasta nenhuma delas.',
       'Se alguma coisa travou no caminho, chame a gente no WhatsApp e conte onde parou.',
     ];
     cta = 'Fazer minha primeira live →';
@@ -475,3 +633,57 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug) {
 
   return { subject, html, text };
 }
+
+/* 08/10/2026 — lembrete de confirmar o e-mail. O link vem do Admin SDK
+   (generateEmailVerificationLink), o mesmo tipo de link do e-mail do Firebase.
+   E aviso da conta, nao dica: sem link de descadastro, e no maximo 2. */
+function montarConfirmacao(etapa, nome, link) {
+  const subject = etapa === 'c2' ? 'Seu teste grátis do Moviki está esperando' : 'Falta 1 passo: confirme seu e-mail';
+  const titulo  = etapa === 'c2' ? 'Seu teste grátis ainda não começou' : 'Falta 1 passo';
+  const paragrafos = [
+    'Você criou sua conta no Moviki, mas o e-mail ainda não foi confirmado. Assim que confirmar, seus 30 dias de teste grátis começam, com 2 lives pelo celular e o ensaio, que ninguém vê.',
+    'É só tocar no botão abaixo. Depois, volte ao painel: ele percebe a confirmação sozinho.',
+  ];
+  const pHtml = paragrafos.map(t => '<p style="margin:0 0 16px">' + esc(t) + '</p>').join('');
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#eef2f7;font-family:Arial,Helvetica,sans-serif;color:#1c2a3a">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f7;padding:24px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(20,40,80,.08)">
+        <tr><td style="background:linear-gradient(135deg,#0c2138,#0e2d54);padding:26px 30px;text-align:center">
+          <img src="${SITE}/logo.png" alt="Moviki" height="34" style="height:34px;display:inline-block">
+        </td></tr>
+        <tr><td style="padding:32px 34px 8px">
+          <h1 style="margin:0 0 8px;font-size:22px;color:#0c2138">Olá, ${esc(nome)}!</h1>
+          <p style="margin:0;font-size:17px;color:#0066FF;font-weight:bold">${esc(titulo)}</p>
+        </td></tr>
+        <tr><td style="padding:14px 34px 0;font-size:15px;line-height:1.6;color:#33465c">
+          ${pHtml}
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 22px">
+            <tr><td style="border-radius:11px;background:linear-gradient(135deg,#0066FF,#0aa2c8)">
+              <a href="${esc(link)}" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none">Confirmar meu e-mail →</a>
+            </td></tr>
+          </table>
+          <p style="margin:0 0 6px;font-size:13px;color:#64748b">Se não foi você que criou a conta, pode ignorar este e-mail.</p>
+          <p style="margin:0 0 6px;font-size:14px;color:#64748b">Dúvida? Chame a gente no WhatsApp:</p>
+          <p style="margin:0 0 24px;font-size:15px"><a href="${WPP_LINK}" style="color:#16a34a;font-weight:bold;text-decoration:none">${WPP_TEXTO}</a></p>
+        </td></tr>
+        <tr><td style="padding:20px 34px;border-top:1px solid #e4e9f0;text-align:center">
+          <p style="margin:0 0 4px;font-size:14px;color:#33465c;font-weight:bold">Equipe Moviki</p>
+          <p style="margin:0;font-size:12px;color:#94a3b8">Sua loja ao vivo, pelo celular.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+  const text = [
+    'Olá, ' + nome + '!', '', titulo + '.', '', ...paragrafos, '',
+    'Confirmar meu e-mail: ' + link, '',
+    'Se não foi você que criou a conta, pode ignorar este e-mail.', '',
+    'Dúvida? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')', '', 'Equipe Moviki',
+  ].join('\n');
+  return { subject, html, text };
+}
+
+module.exports._t = { decidirFlag, decidirConfirma, montarAtivacao, montarConfirmacao, montarEmail, CORTE_NOVIDADE };
