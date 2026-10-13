@@ -1,4 +1,4 @@
-// api/robos.js | versao 2026-10-13-custos (sugestoes de custo para o Custos e margem) | antes 2026-10-13-robos  (repo: moviki-robo)
+// api/robos.js | versao 2026-10-13-ordens (ordens do dono aos robos, por texto ou voz, via Maestro) | antes 2026-10-13-custos | antes 2026-10-13-robos  (repo: moviki-robo)
 // CENTRAL DOS ROBOS — 13/10/2026 (pedido do Paulo: ver todos os robos
 // trabalhando juntos no painel do dono, e o "Vi" / "Feito" marcado no painel
 // chegar sozinho aos robos e ao Claude).
@@ -48,7 +48,7 @@ const { freioUid } = require('../lib/freio');
 const { bearerConfere } = require('../lib/segredo');
 const { CATALOGO, POR_ID, prazoMs } = require('../lib/robosCatalogo');
 
-const VERSAO = '2026-10-13-custos';
+const VERSAO = '2026-10-13-ordens';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const DIA = 86400000;
 const MAX_TAREFAS = 50;          // por relatorio
@@ -265,6 +265,10 @@ async function painel(agora) {
     db.collection('robos_execucoes').orderBy('em', 'desc').limit(60).get(),
   ]);
   const qc = await db.collection('robos_custos').where('status', '==', 'proposta').limit(100).get();
+  const qo = await db.collection('robos_ordens').where('criadaEm', '>=', TS(agora - 30 * DIA)).limit(150).get();
+  const ordens = [];
+  qo.forEach((d) => ordens.push(ordemPublica(d.id, d.data() || {})));
+  ordens.sort((a, b) => (b.criadaEm || 0) - (a.criadaEm || 0));
   const est = {};
   qe.forEach((d) => { est[d.id] = d.data() || {}; });
   const tarefas = []; const vistos = {};
@@ -282,6 +286,7 @@ async function painel(agora) {
     return {
       id, nome: (cat && cat.nome) || (s && s.nome) || id, freq: cat ? cat.freq : '', quando: (cat && cat.quando) || (s && s.quando) || '',
       area: (cat && cat.area) || (s && s.area) || '', faz: (cat && cat.faz) || '', novo: !!(cat && cat.novo), foraDoCatalogo: !cat,
+      comandavel: !!(cat && cat.gatilho),
       situacao: sit, gravidade: (s && s.gravidade) || null, manchete: (s && s.manchete) || '', resumo: (s && s.resumo) || '', link: (s && s.link) || '',
       ultimaEm: ultima || null, execucoes: s ? Number(s.execucoes) || 0 : 0,
       relatorioNovo: !!ultima && (!visto || visto < ultima), relatorioVistoEm: visto || null,
@@ -312,8 +317,9 @@ async function painel(agora) {
     relatoriosNovos: robos.filter((r) => r.relatorioNovo).length,
     tarefasAbertas: tarefas.filter((t) => t.status === 'aberta').length,
     custosPropostos: qc.size,
+    ordensAbertas: ordens.filter((o) => o.status === 'pendente' || o.status === 'enviada').length,
   };
-  return { status: 200, json: { ok: true, versao: VERSAO, agora, resumo, robos, tarefas, execucoes } };
+  return { status: 200, json: { ok: true, versao: VERSAO, agora, resumo, robos, tarefas, execucoes, ordens } };
 }
 
 const DESTINOS = {
@@ -473,6 +479,89 @@ async function custoDecidir(body, uid, agora) {
   });
 }
 
+/* ---------------------------------------------------------------- ORDENS
+   13/10/2026 (pedido do Paulo: dar comando aos robos pelo painel, inclusive
+   por voz). O dono escreve (ou fala) a ordem no painel; o robo MAESTRO (tarefa
+   agendada de hora em hora) le as ordens pendentes, acorda o robo certo com a
+   ordem no texto do disparo e marca "enviada"; o robo cumpre dentro das travas
+   do proprio prompt e responde aqui ("cumprida", "parcial" ou "recusada").
+   Dono: 'ordem' (mandar) e 'ordemCancelar'. Robo: 'ordensPendentes' e
+   'ordemEnviada' (so o Maestro), 'ordemResposta' (o robo que cumpriu). */
+
+const ORDEM_ID_OK = /^[A-Za-z0-9]{20}$/;
+const ORDEM_FIM = ['cumprida', 'parcial', 'recusada'];
+
+function ordemPublica(id, o) {
+  return {
+    id, robo: o.robo || '', texto: o.texto || '', status: o.status || 'pendente', resposta: o.resposta || '',
+    criadaEm: msDe(o.criadaEm) || null, enviadaEm: msDe(o.enviadaEm) || null, respondidaEm: msDe(o.respondidaEm) || null,
+  };
+}
+
+async function ordemNova(body, uid, agora) {
+  const robo = String(body.robo || '').toLowerCase().trim();
+  const cat = POR_ID[robo];
+  if (!cat || !cat.gatilho) return { status: 400, json: { ok: false, erro: 'robo_sem_gatilho', mensagem: 'Este robô não recebe ordem pelo painel.' } };
+  const texto = txtLongo(body.texto, 1500);
+  if (texto.length < 3) return { status: 400, json: { ok: false, erro: 'ordem_vazia' } };
+  const ref = db.collection('robos_ordens').doc();
+  const o = { robo, texto, status: 'pendente', criadaEm: TS(agora), porUid: uid, expiraEm: TS(agora + 90 * DIA) };
+  await ref.set(o);
+  return { status: 200, json: { ok: true, ordem: ordemPublica(ref.id, o) } };
+}
+
+async function ordemCancelar(body, uid, agora) {
+  const id = String(body.ordem || '');
+  if (!ORDEM_ID_OK.test(id)) return { status: 400, json: { ok: false, erro: 'pedido_invalido' } };
+  const ref = db.collection('robos_ordens').doc(id);
+  return db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists) return { status: 404, json: { ok: false, erro: 'nao_existe' } };
+    const cur = s.data() || {};
+    if (cur.status !== 'pendente') return { status: 409, json: { ok: false, erro: 'ja_saiu', status: cur.status, mensagem: 'O robô já recebeu esta ordem.' } };
+    tx.set(ref, { status: 'cancelada', respondidaEm: TS(agora), porUid: uid }, { merge: true });
+    return { status: 200, json: { ok: true, ordem: ordemPublica(id, Object.assign({}, cur, { status: 'cancelada', respondidaEm: agora })) } };
+  });
+}
+
+// So o Maestro: ordens que ainda nao sairam, com a tarefa agendada de cada robo.
+async function ordensPendentes() {
+  const q = await db.collection('robos_ordens').where('status', '==', 'pendente').limit(50).get();
+  const ordens = [];
+  q.forEach((d) => {
+    const o = d.data() || {}; const cat = POR_ID[o.robo] || {};
+    ordens.push(Object.assign(ordemPublica(d.id, o), { nome: cat.nome || o.robo, gatilho: cat.gatilho || '' }));
+  });
+  ordens.sort((a, b) => (a.criadaEm || 0) - (b.criadaEm || 0));
+  return { status: 200, json: { ok: true, ordens } };
+}
+
+async function ordemMarcar(body, agora) {
+  const id = String(body.ordem || '');
+  const acao = String(body.acao || '');
+  if (!ORDEM_ID_OK.test(id)) return { status: 400, json: { ok: false, erro: 'pedido_invalido' } };
+  const robo = String(body.robo || '').toLowerCase().trim();
+  const ref = db.collection('robos_ordens').doc(id);
+  return db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists) return { status: 404, json: { ok: false, erro: 'nao_existe' } };
+    const cur = s.data() || {};
+    if (acao === 'ordemEnviada') {
+      if (robo !== 'maestro') return { status: 403, json: { ok: false, erro: 'so_maestro' } };
+      if (cur.status !== 'pendente') return { status: 409, json: { ok: false, erro: 'ja_saiu', status: cur.status } };
+      tx.set(ref, { status: 'enviada', enviadaEm: TS(agora), sessao: txt(body.sessao, 80) }, { merge: true });
+      return { status: 200, json: { ok: true } };
+    }
+    // ordemResposta: so o robo dono da ordem
+    if (robo !== cur.robo) return { status: 403, json: { ok: false, erro: 'outro_robo' } };
+    const st = String(body.status || '');
+    if (ORDEM_FIM.indexOf(st) < 0) return { status: 400, json: { ok: false, erro: 'status_invalido' } };
+    if (['pendente', 'enviada'].indexOf(cur.status) < 0) return { status: 409, json: { ok: false, erro: 'ja_respondida', status: cur.status } };
+    tx.set(ref, { status: st, resposta: txtLongo(body.resposta, 2000), respondidaEm: TS(agora) }, { merge: true });
+    return { status: 200, json: { ok: true } };
+  });
+}
+
 /* ---------------------------------------------------------------- PORTA */
 
 function corpo(req) {
@@ -496,7 +585,7 @@ module.exports = async (req, res) => {
 
     // ---- porta do dono (idToken do Google)
     if (body.idToken) {
-      if (['painel', 'marcar', 'verRobo', 'custos', 'custoDecidir'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
+      if (['painel', 'marcar', 'verRobo', 'custos', 'custoDecidir', 'ordem', 'ordemCancelar'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
       let dec;
       try { dec = await admin.auth().verifyIdToken(String(body.idToken), true); }
       catch (_) { res.status(401).json({ ok: false, erro: 'sessao' }); return; }
@@ -509,7 +598,9 @@ module.exports = async (req, res) => {
         : acao === 'marcar' ? await marcar(body, dec.uid, agora)
         : acao === 'verRobo' ? await verRobo(body, dec.uid, agora)
         : acao === 'custos' ? await custosDono(agora)
-        : await custoDecidir(body, dec.uid, agora);
+        : acao === 'custoDecidir' ? await custoDecidir(body, dec.uid, agora)
+        : acao === 'ordem' ? await ordemNova(body, dec.uid, agora)
+        : await ordemCancelar(body, dec.uid, agora);
       res.status(r.status).json(r.json); return;
     }
 
@@ -517,7 +608,7 @@ module.exports = async (req, res) => {
     const segredo = process.env.ROBOS_SECRET || '';
     if (segredo.length < 32) { res.status(503).json({ ok: false, erro: 'robos_sem_segredo' }); return; }
     if (!bearerConfere(req, segredo)) { res.status(401).json({ ok: false, erro: 'segredo' }); return; }
-    if (['relatorio', 'pendencias', 'custos', 'custosAtuais'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
+    if (['relatorio', 'pendencias', 'custos', 'custosAtuais', 'ordensPendentes', 'ordemEnviada', 'ordemResposta'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
     const quem = String(body.robo || 'x').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40) || 'x';
     if (!(await freioUid(admin, db, 'robos', quem, 120, 3600000))) {
       res.status(429).json({ ok: false, erro: 'freio' }); return;
@@ -525,7 +616,9 @@ module.exports = async (req, res) => {
     const r = acao === 'relatorio' ? await relatorio(body, agora)
       : acao === 'pendencias' ? await pendencias(body, agora)
       : acao === 'custos' ? await custosPropor(body, agora)
-      : await custosAtuais();
+      : acao === 'custosAtuais' ? await custosAtuais()
+      : acao === 'ordensPendentes' ? await ordensPendentes()
+      : await ordemMarcar(body, agora);
     res.status(r.status).json(r.json);
   } catch (e) {
     console.error('[robos]', (e && e.message) || e);
