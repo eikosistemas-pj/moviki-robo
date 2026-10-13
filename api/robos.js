@@ -1,4 +1,4 @@
-// api/robos.js | versao 2026-10-13-robos  (repo: moviki-robo)
+// api/robos.js | versao 2026-10-13-custos (sugestoes de custo para o Custos e margem) | antes 2026-10-13-robos  (repo: moviki-robo)
 // CENTRAL DOS ROBOS — 13/10/2026 (pedido do Paulo: ver todos os robos
 // trabalhando juntos no painel do dono, e o "Vi" / "Feito" marcado no painel
 // chegar sozinho aos robos e ao Claude).
@@ -48,7 +48,7 @@ const { freioUid } = require('../lib/freio');
 const { bearerConfere } = require('../lib/segredo');
 const { CATALOGO, POR_ID, prazoMs } = require('../lib/robosCatalogo');
 
-const VERSAO = '2026-10-13-robos';
+const VERSAO = '2026-10-13-custos';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const DIA = 86400000;
 const MAX_TAREFAS = 50;          // por relatorio
@@ -264,6 +264,7 @@ async function painel(agora) {
     db.collection('robos_tarefas').where('atualizadaEm', '>=', TS(agora - 7 * DIA)).limit(500).get(),
     db.collection('robos_execucoes').orderBy('em', 'desc').limit(60).get(),
   ]);
+  const qc = await db.collection('robos_custos').where('status', '==', 'proposta').limit(100).get();
   const est = {};
   qe.forEach((d) => { est[d.id] = d.data() || {}; });
   const tarefas = []; const vistos = {};
@@ -310,6 +311,7 @@ async function painel(agora) {
     atrasados: robos.filter((r) => r.situacao === 'atrasado').length,
     relatoriosNovos: robos.filter((r) => r.relatorioNovo).length,
     tarefasAbertas: tarefas.filter((t) => t.status === 'aberta').length,
+    custosPropostos: qc.size,
   };
   return { status: 200, json: { ok: true, versao: VERSAO, agora, resumo, robos, tarefas, execucoes } };
 }
@@ -367,6 +369,110 @@ async function verRobo(body, uid, agora) {
   return { status: 200, json: { ok: true, robo, tarefasVistas: n } };
 }
 
+/* ---------------------------------------------------------------- CUSTOS
+   13/10/2026 (pedido do Paulo: os custos que entram tambem vao para o
+   financeiro). O robo financeiro NAO escreve direto no Custos e margem: ele
+   SUGERE (robos_custos/{id}) e o dono aplica com um toque no painel. Quem
+   grava em configuracoes/sistema.custos continua sendo so o painel, com o
+   login do dono (o mesmo caminho do botao "Salvar tudo").
+   Robo: 'custos' (sugerir) e 'custosAtuais' (ler as linhas que ja existem,
+   para nao sugerir duplicado). Dono: 'custos' (listar) e 'custoDecidir'. */
+
+const CS_CATS = ['Ferramenta', 'Infra', 'Midia', 'Fiscal', 'Pessoal', 'Estrutura', 'Comercial', 'Outros'];
+const CS_ACOES = ['incluir', 'atualizar', 'cancelar'];
+const CUSTO_ID_OK = /^c_[a-f0-9]{20}$/;
+
+function custoId(chave) { return 'c_' + crypto.createHash('sha1').update(String(chave)).digest('hex').slice(0, 20); }
+function custoPublico(id, c) {
+  return {
+    id, robo: c.robo || '', chave: c.chave || '', nome: c.nome || '', nomePainel: c.nomePainel || '', categoria: c.categoria || 'Outros',
+    valor: Number(c.valor) || 0, moeda: c.moeda === 'USD' ? 'USD' : 'BRL', acao: c.acao || 'incluir', ciclo: c.ciclo || '',
+    motivo: c.motivo || '', fonte: c.fonte || '', status: c.status || 'proposta',
+    propostaEm: msDe(c.propostaEm) || null, decididaEm: msDe(c.decididaEm) || null,
+  };
+}
+
+async function custosPropor(body, agora) {
+  const robo = String(body.robo || '').toLowerCase().trim();
+  if (!ID_OK.test(robo)) return { status: 400, json: { ok: false, erro: 'robo_invalido' } };
+  const itens = Array.isArray(body.itens) ? body.itens.slice(0, 30) : [];
+  if (!itens.length) return { status: 400, json: { ok: false, erro: 'sem_itens' } };
+  let novas = 0, iguais = 0, invalidas = 0;
+  const batch = db.batch();
+  for (const it of itens) {
+    if (!it || typeof it !== 'object') { invalidas++; continue; }
+    const nome = txt(it.nome, 60);
+    const chave = chaveDe({ chave: it.chave || nome });
+    const acao = CS_ACOES.indexOf(String(it.acao || '')) >= 0 ? String(it.acao) : 'incluir';
+    const valor = Number(it.valor);
+    if (!nome || !chave || !isFinite(valor) || valor < 0 || valor > 100000) { invalidas++; continue; }
+    const p = {
+      robo, chave, nome, nomePainel: txt(it.nomePainel, 60), acao,
+      categoria: CS_CATS.indexOf(String(it.categoria || '')) >= 0 ? String(it.categoria) : 'Outros',
+      valor: acao === 'cancelar' ? 0 : Math.round(valor * 100) / 100,
+      moeda: it.moeda === 'USD' ? 'USD' : 'BRL',
+      ciclo: txt(it.ciclo, 30), motivo: txt(it.motivo, 300), fonte: txt(it.fonte, 200),
+    };
+    const ref = db.collection('robos_custos').doc(custoId(chave));
+    const s = await ref.get();
+    const cur = s.exists ? (s.data() || {}) : null;
+    const mesmo = cur && cur.nome === p.nome && (cur.nomePainel || '') === p.nomePainel && cur.categoria === p.categoria
+      && Number(cur.valor) === p.valor && cur.moeda === p.moeda && cur.acao === p.acao;
+    if (cur && mesmo && cur.status !== 'proposta') { iguais++; continue; }
+    novas++;
+    batch.set(ref, Object.assign({}, p, { status: 'proposta', propostaEm: TS(agora), decididaEm: admin.firestore.FieldValue.delete(),
+      expiraEm: admin.firestore.FieldValue.delete() }), { merge: true });
+  }
+  if (novas) await batch.commit();
+  return { status: 200, json: { ok: true, novas, iguais, invalidas } };
+}
+
+// Linhas que ja estao no Custos e margem + sugestoes em aberto (o robo le antes de sugerir).
+async function custosAtuais() {
+  const [cfg, q] = await Promise.all([
+    db.collection('configuracoes').doc('sistema').get(),
+    db.collection('robos_custos').where('status', '==', 'proposta').limit(100).get(),
+  ]);
+  const c = cfg.exists ? ((cfg.data() || {}).custos || null) : null;
+  const linhas = c && Array.isArray(c.itens) ? c.itens.slice(0, 120).map((it) => ({
+    nome: txt(it && it.n, 60), categoria: txt(it && it.c, 20), valor: Number(it && it.v) || 0, moeda: (it && it.m) === 'USD' ? 'USD' : 'BRL',
+  })) : null;
+  const propostas = [];
+  q.forEach((d) => propostas.push(custoPublico(d.id, d.data() || {})));
+  return { status: 200, json: { ok: true, salvoNoPainel: !!linhas, dolar: c && typeof c.dolar === 'number' ? c.dolar : null,
+    linhas: linhas || [], propostas } };
+}
+
+async function custosDono(agora) {
+  const [qa, qd] = await Promise.all([
+    db.collection('robos_custos').where('status', '==', 'proposta').limit(100).get(),
+    db.collection('robos_custos').where('decididaEm', '>=', TS(agora - 30 * DIA)).limit(60).get(),
+  ]);
+  const abertas = [], decididas = [];
+  qa.forEach((d) => abertas.push(custoPublico(d.id, d.data() || {})));
+  qd.forEach((d) => { const c = custoPublico(d.id, d.data() || {}); if (c.status !== 'proposta') decididas.push(c); });
+  abertas.sort((a, b) => (b.propostaEm || 0) - (a.propostaEm || 0));
+  decididas.sort((a, b) => (b.decididaEm || 0) - (a.decididaEm || 0));
+  return { status: 200, json: { ok: true, abertas, decididas } };
+}
+
+// O painel ja gravou a linha em configuracoes/sistema.custos (caminho do
+// "Salvar tudo"); aqui so marca a sugestao como aplicada ou recusada.
+async function custoDecidir(body, uid, agora) {
+  const id = String(body.custo || '');
+  const decisao = String(body.decisao || '');
+  if (!CUSTO_ID_OK.test(id) || ['aplicada', 'recusada'].indexOf(decisao) < 0) return { status: 400, json: { ok: false, erro: 'pedido_invalido' } };
+  const ref = db.collection('robos_custos').doc(id);
+  return db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists) return { status: 404, json: { ok: false, erro: 'nao_existe' } };
+    const cur = s.data() || {};
+    if (cur.status !== 'proposta') return { status: 409, json: { ok: false, erro: 'ja_mudou', status: cur.status } };
+    tx.set(ref, { status: decisao, decididaEm: TS(agora), porUid: uid, expiraEm: TS(agora + 180 * DIA) }, { merge: true });
+    return { status: 200, json: { ok: true, custo: custoPublico(id, Object.assign({}, cur, { status: decisao, decididaEm: agora })) } };
+  });
+}
+
 /* ---------------------------------------------------------------- PORTA */
 
 function corpo(req) {
@@ -390,7 +496,7 @@ module.exports = async (req, res) => {
 
     // ---- porta do dono (idToken do Google)
     if (body.idToken) {
-      if (['painel', 'marcar', 'verRobo'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
+      if (['painel', 'marcar', 'verRobo', 'custos', 'custoDecidir'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
       let dec;
       try { dec = await admin.auth().verifyIdToken(String(body.idToken), true); }
       catch (_) { res.status(401).json({ ok: false, erro: 'sessao' }); return; }
@@ -401,7 +507,9 @@ module.exports = async (req, res) => {
       }
       const r = acao === 'painel' ? await painel(agora)
         : acao === 'marcar' ? await marcar(body, dec.uid, agora)
-        : await verRobo(body, dec.uid, agora);
+        : acao === 'verRobo' ? await verRobo(body, dec.uid, agora)
+        : acao === 'custos' ? await custosDono(agora)
+        : await custoDecidir(body, dec.uid, agora);
       res.status(r.status).json(r.json); return;
     }
 
@@ -409,12 +517,15 @@ module.exports = async (req, res) => {
     const segredo = process.env.ROBOS_SECRET || '';
     if (segredo.length < 32) { res.status(503).json({ ok: false, erro: 'robos_sem_segredo' }); return; }
     if (!bearerConfere(req, segredo)) { res.status(401).json({ ok: false, erro: 'segredo' }); return; }
-    if (['relatorio', 'pendencias'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
+    if (['relatorio', 'pendencias', 'custos', 'custosAtuais'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
     const quem = String(body.robo || 'x').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40) || 'x';
     if (!(await freioUid(admin, db, 'robos', quem, 120, 3600000))) {
       res.status(429).json({ ok: false, erro: 'freio' }); return;
     }
-    const r = acao === 'relatorio' ? await relatorio(body, agora) : await pendencias(body, agora);
+    const r = acao === 'relatorio' ? await relatorio(body, agora)
+      : acao === 'pendencias' ? await pendencias(body, agora)
+      : acao === 'custos' ? await custosPropor(body, agora)
+      : await custosAtuais();
     res.status(r.status).json(r.json);
   } catch (e) {
     console.error('[robos]', (e && e.message) || e);
@@ -422,4 +533,4 @@ module.exports = async (req, res) => {
   }
 };
 
-module.exports._t = { gravidade, chaveDe, tarefaId, situacao, txt, txtLongo, link, VERSAO };
+module.exports._t = { custoId, gravidade, chaveDe, tarefaId, situacao, txt, txtLongo, link, VERSAO };

@@ -146,6 +146,36 @@ const B = 'Bearer ' + SEGREDO;
   conf(t.situacao({ freq: 'semanal' }, { ultimaEm: dois, gravidade: 'ok' }, Date.now()) === 'ok', 'semanal com 2 dias = ok');
   conf(t.situacao({ freq: 'demanda' }, { ultimaEm: 0 }, Date.now()) === 'sem_relatorio', 'sob demanda sem relatorio');
 
+  // 14. custos sugeridos pelos robos (13/10/2026)
+  fake.store.set('configuracoes/sistema', { vikPadraoLigado: true, custos: { dolar: 5.4, itens: [ { n: 'Contador', c: 'Fiscal', v: 0, m: 'BRL' } ] } });
+  r = await post({ acao: 'custosAtuais', robo: 'vencimentos' }, B);
+  conf(r.c === 200 && r.b.salvoNoPainel && r.b.linhas.length === 1 && r.b.linhas[0].nome === 'Contador', 'robo le as linhas do Custos e margem');
+  r = await post({ acao: 'custos', robo: 'vencimentos', itens: [
+    { chave: 'manychat-pro', nome: 'ManyChat Pro', categoria: 'Ferramenta', valor: 0, moeda: 'BRL', acao: 'incluir', motivo: 'teste ate 23/10' },
+    { chave: 'contabilizei', nome: 'Contabilizei', nomePainel: 'Contador', categoria: 'Fiscal', valor: 379, moeda: 'BRL', acao: 'atualizar' },
+    { nome: '', valor: 10 }, { nome: 'Caro demais', valor: 999999 },
+  ] }, B);
+  conf(r.c === 200 && r.b.novas === 2 && r.b.invalidas === 2, 'sugestoes gravadas: ' + JSON.stringify(r.b));
+  r = await post({ acao: 'custos', robo: 'vencimentos', itens: [ { chave: 'contabilizei', nome: 'Contabilizei', nomePainel: 'Contador', categoria: 'Fiscal', valor: 379, moeda: 'BRL', acao: 'atualizar' } ] }, B);
+  conf(r.b.novas === 1, 'mesma sugestao ainda aberta: so atualiza');
+  r = await post({ acao: 'custos', idToken: 'tSenha' });
+  conf(r.c === 403, 'custos so com Google');
+  r = await post({ acao: 'custos', idToken: 'tDono' });
+  conf(r.c === 200 && r.b.abertas.length === 2, 'dono ve 2 sugestoes');
+  const cont = r.b.abertas.find((c) => c.chave === 'contabilizei');
+  r = await post({ acao: 'custoDecidir', idToken: 'tDono', custo: cont.id, decisao: 'aplicada' });
+  conf(r.c === 200 && r.b.custo.status === 'aplicada', 'aplicar');
+  r = await post({ acao: 'custoDecidir', idToken: 'tDono', custo: cont.id, decisao: 'recusada' });
+  conf(r.c === 409, 'decidir de novo = ja_mudou');
+  r = await post({ acao: 'custos', robo: 'vencimentos', itens: [ { chave: 'contabilizei', nome: 'Contabilizei', nomePainel: 'Contador', categoria: 'Fiscal', valor: 379, moeda: 'BRL', acao: 'atualizar' } ] }, B);
+  conf(r.b.iguais === 1 && r.b.novas === 0, 'ja aplicada com o mesmo valor: nao volta');
+  r = await post({ acao: 'custos', robo: 'vencimentos', itens: [ { chave: 'contabilizei', nome: 'Contabilizei', nomePainel: 'Contador', categoria: 'Fiscal', valor: 395, moeda: 'BRL', acao: 'atualizar' } ] }, B);
+  conf(r.b.novas === 1, 'valor mudou: vira sugestao nova');
+  r = await post({ acao: 'painel', idToken: 'tDono' });
+  conf(r.b.resumo.custosPropostos === 2, 'painel conta as sugestoes abertas');
+  r = await post({ acao: 'custoDecidir', idToken: 'tDono', custo: 'c_../x', decisao: 'aplicada' });
+  conf(r.c === 400, 'id de custo invalido');
+
   console.log(falhas ? ('FALHAS: ' + falhas + ' | ok: ' + ok) : ('robos: tudo certo (' + ok + ' conferencias)'));
   process.exit(falhas ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
