@@ -210,6 +210,54 @@ const B = 'Bearer ' + SEGREDO;
   conf(r.b.robos.find((x) => x.id === 'pulso').comandavel === true && r.b.robos.find((x) => x.id === 'caixa-parceiros').comandavel === false, 'comandavel');
   conf(r.b.resumo.ordensAbertas === 0, 'nenhuma ordem aberta');
 
+  // 16. agenda lida pelo Maestro (13/10/2026): robo novo aparece sozinho
+  const TNOVO = 'trig_01NovoRoboAAAAAAAAAAAAA', TMAE = 'trig_01MaestroBBBBBBBBBBBBB';
+  r = await post({ acao: 'agenda', robo: 'pulso', tarefas: [] }, B);
+  conf(r.c === 403, 'so o maestro manda a agenda');
+  r = await post({ acao: 'agenda', idToken: 'tDono', tarefas: [] });
+  conf(r.c === 400, 'dono nao manda agenda');
+  r = await post({ acao: 'agenda', robo: 'maestro', completa: true, eu: TMAE, tarefas: [
+    { gatilho: 'trig_01PKDLdqzgGJnWCxU3zCgemG', nome: 'Moviki — Pulso', quando: '0 7 * * *', ligado: true },
+    { gatilho: TNOVO, nome: 'Moviki — Robo <b>novo</b>', quando: '0 9 * * *', ligado: true },
+    { gatilho: 'trig_01VUChTDbLDLKFAtv8FcDSAV', nome: 'Material visual', ligado: false },
+    { gatilho: TMAE, nome: 'Moviki — Maestro', quando: '0 * * * *' },
+    { gatilho: '../x', nome: 'lixo' },
+  ] }, B);
+  conf(r.c === 200 && r.b.total === 4 && r.b.novos === 4, 'agenda gravada: ' + JSON.stringify(r.b));
+  r = await post({ acao: 'agenda', robo: 'maestro', completa: true, eu: TMAE, tarefas: [
+    { gatilho: 'trig_01PKDLdqzgGJnWCxU3zCgemG', nome: 'Moviki — Pulso', quando: '0 7 * * *', ligado: true },
+    { gatilho: TNOVO, nome: 'Moviki — Robo <b>novo</b>', quando: '0 9 * * *', ligado: true },
+    { gatilho: 'trig_01VUChTDbLDLKFAtv8FcDSAV', nome: 'Material visual', ligado: false },
+    { gatilho: TMAE, nome: 'Moviki — Maestro', quando: '0 * * * *' },
+  ] }, B);
+  conf(r.c === 200 && r.b.novos === 0 && r.b.mudaram === 0, 'agenda igual nao regrava');
+  const agId = h._t.idDaAgenda(TNOVO);
+  r = await post({ acao: 'painel', idToken: 'tDono' });
+  const rn = r.b.robos.find((x) => x.id === agId);
+  conf(rn && rn.comandavel === true && rn.naAgenda && rn.foraDoCatalogo && rn.nome.indexOf('<') < 0, 'robo novo da agenda aparece e recebe ordem: ' + JSON.stringify(rn));
+  conf(!r.b.robos.find((x) => x.id === h._t.idDaAgenda(TMAE)), 'o proprio maestro nao vira robo da agenda');
+  conf(r.b.robos.find((x) => x.id === 'material-visual').pausado === true, 'tarefa pausada aparece pausada');
+  conf(r.b.robos.find((x) => x.id === 'maestro').comandavel === false, 'maestro nao recebe ordem');
+  conf(r.b.resumo.agendaLidaEm > 0, 'painel sabe quando a agenda foi lida');
+  r = await post({ acao: 'ordem', idToken: 'tDono', robo: agId, texto: 'Se apresente.' });
+  conf(r.c === 200, 'ordem para robo novo da agenda');
+  const oNovo = r.b.ordem.id;
+  r = await post({ acao: 'ordensPendentes', robo: 'maestro' }, B);
+  conf(r.b.ordens.length === 1 && r.b.ordens[0].gatilho === TNOVO, 'maestro recebe o gatilho do robo novo');
+  r = await post({ acao: 'ordemEnviada', robo: 'maestro', ordem: oNovo, falha: 'tarefa nao encontrada' }, B);
+  conf(r.c === 200 && fake.store.get('robos_ordens/' + oNovo).status === 'recusada', 'falha do maestro vira recusada');
+  // robo novo manda relatorio com o proprio gatilho -> deixa de aparecer duas vezes
+  r = await post({ acao: 'relatorio', robo: 'caixa-parceiros', gatilho: TNOVO, manchete: 'ok' }, B);
+  r = await post({ acao: 'painel', idToken: 'tDono' });
+  conf(!r.b.robos.find((x) => x.id === agId) && r.b.robos.find((x) => x.id === 'caixa-parceiros').comandavel === true, 'relatorio com gatilho liga o robo a agenda');
+  // tarefa apagada no Claude
+  r = await post({ acao: 'agenda', robo: 'maestro', completa: true, eu: TMAE, tarefas: [{ gatilho: 'trig_01PKDLdqzgGJnWCxU3zCgemG', nome: 'Moviki — Pulso' }] }, B);
+  conf(r.b.sumiram === 3, 'tarefas apagadas: ' + JSON.stringify(r.b));
+  r = await post({ acao: 'painel', idToken: 'tDono' });
+  conf(r.b.robos.find((x) => x.id === 'caixa-parceiros').comandavel === false && r.b.robos.find((x) => x.id === 'caixa-parceiros').sumiu === true, 'robo com tarefa apagada nao recebe ordem');
+  r = await post({ acao: 'ordem', idToken: 'tDono', robo: 'caixa-parceiros', texto: 'teste' });
+  conf(r.c === 400, 'servidor recusa ordem para tarefa apagada');
+
   console.log(falhas ? ('FALHAS: ' + falhas + ' | ok: ' + ok) : ('robos: tudo certo (' + ok + ' conferencias)'));
   process.exit(falhas ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
