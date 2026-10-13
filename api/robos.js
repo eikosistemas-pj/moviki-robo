@@ -1,4 +1,4 @@
-// api/robos.js | versao 2026-10-13-ordens (ordens do dono aos robos, por texto ou voz, via Maestro) | antes 2026-10-13-custos | antes 2026-10-13-robos  (repo: moviki-robo)
+// api/robos.js | versao 2026-10-13-agenda (o Maestro le a agenda de tarefas agendadas toda hora: robo novo aparece sozinho no painel e ja recebe ordem) | antes 2026-10-13-ordens (ordens do dono aos robos, por texto ou voz, via Maestro) | antes 2026-10-13-custos | antes 2026-10-13-robos  (repo: moviki-robo)
 // CENTRAL DOS ROBOS — 13/10/2026 (pedido do Paulo: ver todos os robos
 // trabalhando juntos no painel do dono, e o "Vi" / "Feito" marcado no painel
 // chegar sozinho aos robos e ao Claude).
@@ -27,6 +27,11 @@
 //                            | descartada (dono mandou ignorar).
 //                            id = <robo>__<sha1(chave)>: o robo manda a mesma
 //                            chave toda rodada e a tarefa nao se repete.
+//   robos_ordens/{auto}      ordens do dono a um robo (texto ou voz no painel).
+//   robos_agenda/{trig_...}  13/10: TODAS as tarefas agendadas da conta, lidas
+//                            de hora em hora pelo Maestro (acao 'agenda'). Robo
+//                            criado depois aparece sozinho no painel e ja pode
+//                            receber ordem, sem mexer no catalogo.
 //
 // REGRAS DA TAREFA QUANDO O ROBO REPORTA DE NOVO
 //   - aberta/vista: atualiza texto e gravidade; se a gravidade SUBIU e ela
@@ -48,7 +53,7 @@ const { freioUid } = require('../lib/freio');
 const { bearerConfere } = require('../lib/segredo');
 const { CATALOGO, POR_ID, prazoMs } = require('../lib/robosCatalogo');
 
-const VERSAO = '2026-10-13-ordens';
+const VERSAO = '2026-10-13-agenda';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 const DIA = 86400000;
 const MAX_TAREFAS = 50;          // por relatorio
@@ -57,6 +62,9 @@ const GRAV = { ok: 0, atencao: 1, critico: 2 };
 const ABERTOS = ['aberta', 'vista', 'feita'];
 const ID_OK = /^[a-z0-9][a-z0-9-]{1,39}$/;
 const TAREFA_ID_OK = /^[a-z0-9][a-z0-9-]{1,39}__[a-f0-9]{20}$/;
+const GATILHO_OK = /^trig_[A-Za-z0-9]{10,40}$/;
+const AG_ID_OK = /^ag-[a-f0-9]{12}$/;
+const MAX_AGENDA = 200;
 
 function txt(s, n) { return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n); }
 // texto longo: mantem quebra de linha
@@ -186,6 +194,8 @@ async function relatorio(body, agora) {
     robo, ultimaEm: TS(agora), gravidade: g, manchete, resumo, link: lk,
     execucoes: admin.firestore.FieldValue.increment(1), versao: VERSAO,
   };
+  const gat = String(body.gatilho || '').trim();   // 13/10: o robo diz a propria tarefa agendada (liga o robo a agenda)
+  if (GATILHO_OK.test(gat)) est.gatilho = gat;
   if (!cat) {
     est.foraDoCatalogo = true;
     est.nome = txt(body.nome, 80) || (estSnap.exists ? (estSnap.data() || {}).nome : robo);
@@ -266,6 +276,12 @@ async function painel(agora) {
   ]);
   const qc = await db.collection('robos_custos').where('status', '==', 'proposta').limit(100).get();
   const qo = await db.collection('robos_ordens').where('criadaEm', '>=', TS(agora - 30 * DIA)).limit(150).get();
+  const qg = await db.collection('robos_agenda').get();
+  const agenda = {}; let agendaSinc = null;
+  qg.forEach((d) => {
+    if (GATILHO_OK.test(d.id)) agenda[d.id] = d.data() || {};
+    else if (d.id === '_sinc') agendaSinc = msDe((d.data() || {}).em) || null;
+  });
   const ordens = [];
   qo.forEach((d) => ordens.push(ordemPublica(d.id, d.data() || {})));
   ordens.sort((a, b) => (b.criadaEm || 0) - (a.criadaEm || 0));
@@ -279,14 +295,25 @@ async function painel(agora) {
     if (t.status === 'aberta') r.abertas++; else if (t.status === 'vista') r.vistas++; else if (t.status === 'feita') r.feitas++;
   });
 
+  // 13/10: de quem e cada tarefa agendada (catalogo > robo que disse no relatorio > robo achado so na agenda)
+  const donoDe = {};
+  CATALOGO.forEach((c) => { if (c.gatilho) donoDe[c.gatilho] = c.id; });
+  Object.keys(est).forEach((id) => { const g = est[id].gatilho; if (g && GATILHO_OK.test(g) && !donoDe[g]) donoDe[g] = id; });
+  const agPorId = {};
+  Object.keys(agenda).forEach((g) => { if (!donoDe[g]) agPorId[idDaAgenda(g)] = g; });
+  const gatilhoDe = (id, cat, s) => (cat && cat.gatilho) || (s && GATILHO_OK.test(s.gatilho || '') ? s.gatilho : '') || agPorId[id] || '';
+
   const linha = (id, cat, s) => {
     const sit = situacao(cat, s, agora);
+    const g = gatilhoDe(id, cat, s);
+    const ag = g ? agenda[g] : null;
     const ultima = s ? msDe(s.ultimaEm) : 0;
     const visto = s ? msDe(s.relatorioVistoEm) : 0;
     return {
-      id, nome: (cat && cat.nome) || (s && s.nome) || id, freq: cat ? cat.freq : '', quando: (cat && cat.quando) || (s && s.quando) || '',
+      id, nome: (cat && cat.nome) || (s && s.nome) || (ag && ag.nome) || id, freq: cat ? cat.freq : '', quando: (cat && cat.quando) || (s && s.quando) || (ag && ag.quando) || '',
       area: (cat && cat.area) || (s && s.area) || '', faz: (cat && cat.faz) || '', novo: !!(cat && cat.novo), foraDoCatalogo: !cat,
-      comandavel: !!(cat && cat.gatilho),
+      comandavel: !!g && id !== 'maestro' && !(ag && ag.sumiu),
+      naAgenda: !!(ag && !ag.sumiu), pausado: !!(ag && !ag.sumiu && ag.ligado === false), sumiu: !!(ag && ag.sumiu),
       situacao: sit, gravidade: (s && s.gravidade) || null, manchete: (s && s.manchete) || '', resumo: (s && s.resumo) || '', link: (s && s.link) || '',
       ultimaEm: ultima || null, execucoes: s ? Number(s.execucoes) || 0 : 0,
       relatorioNovo: !!ultima && (!visto || visto < ultima), relatorioVistoEm: visto || null,
@@ -295,6 +322,7 @@ async function painel(agora) {
   };
   const robos = CATALOGO.map((c) => linha(c.id, c, est[c.id]));
   Object.keys(est).filter((id) => !POR_ID[id]).forEach((id) => robos.push(linha(id, null, est[id])));
+  Object.keys(agPorId).filter((id) => !est[id] && !agenda[agPorId[id]].sumiu).forEach((id) => robos.push(linha(id, null, null)));
 
   const execucoes = [];
   qx.forEach((d) => {
@@ -318,6 +346,7 @@ async function painel(agora) {
     tarefasAbertas: tarefas.filter((t) => t.status === 'aberta').length,
     custosPropostos: qc.size,
     ordensAbertas: ordens.filter((o) => o.status === 'pendente' || o.status === 'enviada').length,
+    agendaLidaEm: agendaSinc,
   };
   return { status: 200, json: { ok: true, versao: VERSAO, agora, resumo, robos, tarefas, execucoes, ordens } };
 }
@@ -498,14 +527,35 @@ function ordemPublica(id, o) {
   };
 }
 
+// 13/10: a tarefa agendada do robo (catalogo > a que o robo disse no relatorio > a achada na agenda).
+// Tarefa que sumiu da agenda (apagada) nao recebe ordem. O Maestro nunca recebe ordem.
+async function gatilhoDoRobo(robo) {
+  if (!ID_OK.test(robo) || robo === 'maestro') return null;
+  const cat = POR_ID[robo] || null;
+  let g = (cat && cat.gatilho) || '', nome = (cat && cat.nome) || '';
+  if (!g) {
+    const s = await db.collection('robos_estado').doc(robo).get();
+    const d = s.exists ? (s.data() || {}) : {};
+    if (GATILHO_OK.test(d.gatilho || '')) { g = d.gatilho; nome = nome || d.nome || ''; }
+  }
+  if (!g && AG_ID_OK.test(robo)) {
+    const q = await db.collection('robos_agenda').where('robo', '==', robo).limit(1).get();
+    q.forEach((d) => { g = d.id; nome = nome || (d.data() || {}).nome || ''; });
+  }
+  if (!g) return null;
+  const a = await db.collection('robos_agenda').doc(g).get();
+  if (a.exists && (a.data() || {}).sumiu) return null;
+  return { gatilho: g, nome: nome || robo };
+}
+
 async function ordemNova(body, uid, agora) {
   const robo = String(body.robo || '').toLowerCase().trim();
-  const cat = POR_ID[robo];
-  if (!cat || !cat.gatilho) return { status: 400, json: { ok: false, erro: 'robo_sem_gatilho', mensagem: 'Este robô não recebe ordem pelo painel.' } };
+  const alvo = await gatilhoDoRobo(robo);
+  if (!alvo) return { status: 400, json: { ok: false, erro: 'robo_sem_gatilho', mensagem: 'Este robô não recebe ordem pelo painel.' } };
   const texto = txtLongo(body.texto, 1500);
   if (texto.length < 3) return { status: 400, json: { ok: false, erro: 'ordem_vazia' } };
   const ref = db.collection('robos_ordens').doc();
-  const o = { robo, texto, status: 'pendente', criadaEm: TS(agora), porUid: uid, expiraEm: TS(agora + 90 * DIA) };
+  const o = { robo, texto, status: 'pendente', criadaEm: TS(agora), porUid: uid, expiraEm: TS(agora + 90 * DIA), gatilho: alvo.gatilho, nome: txt(alvo.nome, 120) };
   await ref.set(o);
   return { status: 200, json: { ok: true, ordem: ordemPublica(ref.id, o) } };
 }
@@ -530,7 +580,7 @@ async function ordensPendentes() {
   const ordens = [];
   q.forEach((d) => {
     const o = d.data() || {}; const cat = POR_ID[o.robo] || {};
-    ordens.push(Object.assign(ordemPublica(d.id, o), { nome: cat.nome || o.robo, gatilho: cat.gatilho || '' }));
+    ordens.push(Object.assign(ordemPublica(d.id, o), { nome: o.nome || cat.nome || o.robo, gatilho: o.gatilho || cat.gatilho || '' }));
   });
   ordens.sort((a, b) => (a.criadaEm || 0) - (b.criadaEm || 0));
   return { status: 200, json: { ok: true, ordens } };
@@ -549,6 +599,11 @@ async function ordemMarcar(body, agora) {
     if (acao === 'ordemEnviada') {
       if (robo !== 'maestro') return { status: 403, json: { ok: false, erro: 'so_maestro' } };
       if (cur.status !== 'pendente') return { status: 409, json: { ok: false, erro: 'ja_saiu', status: cur.status } };
+      const falha = txt(body.falha, 300);   // 13/10: o Maestro nao conseguiu acordar o robo -> o dono ve na hora
+      if (falha) {
+        tx.set(ref, { status: 'recusada', resposta: 'O Maestro não conseguiu acordar este robô: ' + falha, respondidaEm: TS(agora) }, { merge: true });
+        return { status: 200, json: { ok: true, status: 'recusada' } };
+      }
       tx.set(ref, { status: 'enviada', enviadaEm: TS(agora), sessao: txt(body.sessao, 80) }, { merge: true });
       return { status: 200, json: { ok: true } };
     }
@@ -560,6 +615,50 @@ async function ordemMarcar(body, agora) {
     tx.set(ref, { status: st, resposta: txtLongo(body.resposta, 2000), respondidaEm: TS(agora) }, { merge: true });
     return { status: 200, json: { ok: true } };
   });
+}
+
+/* ---------------------------------------------------------------- AGENDA (13/10/2026)
+   Pedido do Paulo: robo novo criado no Claude tem que aparecer sozinho no
+   painel. O Maestro le a lista de tarefas agendadas da conta toda hora e manda
+   aqui ('agenda', so robo 'maestro'). Tarefa nova vira robo no painel (id
+   ag-<hash>) ate mandar relatorio com o proprio gatilho; pausada aparece como
+   pausada; apagada some (completa:true). Grava so o que mudou. */
+
+function idDaAgenda(g) { return 'ag-' + crypto.createHash('sha1').update(String(g)).digest('hex').slice(0, 12); }
+
+async function agendaGravar(body, agora) {
+  if (String(body.robo || '') !== 'maestro') return { status: 403, json: { ok: false, erro: 'so_maestro' } };
+  if (!Array.isArray(body.tarefas)) return { status: 400, json: { ok: false, erro: 'lista' } };
+  const vieram = {};
+  for (const t of body.tarefas.slice(0, MAX_AGENDA)) {
+    if (!t || typeof t !== 'object') continue;
+    const g = String(t.gatilho || '').trim();
+    if (!GATILHO_OK.test(g)) continue;
+    vieram[g] = { gatilho: g, robo: idDaAgenda(g), nome: txt(t.nome, 120) || g, quando: txt(t.quando, 80), ligado: t.ligado !== false };
+  }
+  const q = await db.collection('robos_agenda').get();
+  const atuais = {};
+  q.forEach((d) => { if (GATILHO_OK.test(d.id)) atuais[d.id] = d.data() || {}; });
+  const batch = db.batch();
+  let novos = 0, mudaram = 0, sumiram = 0;
+  Object.keys(vieram).forEach((g) => {
+    const v = vieram[g]; const cur = atuais[g];
+    const ref = db.collection('robos_agenda').doc(g);
+    if (!cur) { novos++; batch.set(ref, Object.assign({}, v, { sumiu: false, achadoEm: TS(agora), atualizadaEm: TS(agora) })); }
+    else if (cur.nome !== v.nome || cur.quando !== v.quando || cur.ligado !== v.ligado || cur.sumiu || cur.robo !== v.robo) {
+      mudaram++; batch.set(ref, Object.assign({}, v, { sumiu: false, atualizadaEm: TS(agora) }), { merge: true });
+    }
+  });
+  if (body.completa === true) {
+    Object.keys(atuais).filter((g) => !vieram[g] && !atuais[g].sumiu).forEach((g) => {
+      sumiram++; batch.set(db.collection('robos_agenda').doc(g), { sumiu: true, sumiuEm: TS(agora), atualizadaEm: TS(agora) }, { merge: true });
+    });
+  }
+  const eu = String(body.eu || '').trim();   // a tarefa do proprio Maestro: nao vira robo "achado na agenda"
+  if (GATILHO_OK.test(eu)) batch.set(db.collection('robos_estado').doc('maestro'), { gatilho: eu }, { merge: true });
+  batch.set(db.collection('robos_agenda').doc('_sinc'), { em: TS(agora), total: Object.keys(vieram).length });
+  await batch.commit();
+  return { status: 200, json: { ok: true, versao: VERSAO, total: Object.keys(vieram).length, novos, mudaram, sumiram } };
 }
 
 /* ---------------------------------------------------------------- PORTA */
@@ -608,7 +707,7 @@ module.exports = async (req, res) => {
     const segredo = process.env.ROBOS_SECRET || '';
     if (segredo.length < 32) { res.status(503).json({ ok: false, erro: 'robos_sem_segredo' }); return; }
     if (!bearerConfere(req, segredo)) { res.status(401).json({ ok: false, erro: 'segredo' }); return; }
-    if (['relatorio', 'pendencias', 'custos', 'custosAtuais', 'ordensPendentes', 'ordemEnviada', 'ordemResposta'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
+    if (['relatorio', 'pendencias', 'custos', 'custosAtuais', 'ordensPendentes', 'ordemEnviada', 'ordemResposta', 'agenda'].indexOf(acao) < 0) { res.status(400).json({ ok: false, erro: 'acao' }); return; }
     const quem = String(body.robo || 'x').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40) || 'x';
     if (!(await freioUid(admin, db, 'robos', quem, 120, 3600000))) {
       res.status(429).json({ ok: false, erro: 'freio' }); return;
@@ -618,6 +717,7 @@ module.exports = async (req, res) => {
       : acao === 'custos' ? await custosPropor(body, agora)
       : acao === 'custosAtuais' ? await custosAtuais()
       : acao === 'ordensPendentes' ? await ordensPendentes()
+      : acao === 'agenda' ? await agendaGravar(body, agora)
       : await ordemMarcar(body, agora);
     res.status(r.status).json(r.json);
   } catch (e) {
@@ -626,4 +726,4 @@ module.exports = async (req, res) => {
   }
 };
 
-module.exports._t = { custoId, gravidade, chaveDe, tarefaId, situacao, txt, txtLongo, link, VERSAO };
+module.exports._t = { idDaAgenda, custoId, gravidade, chaveDe, tarefaId, situacao, txt, txtLongo, link, VERSAO };
