@@ -1,4 +1,4 @@
-// api/novo-parceiro.js | versao 2026-10-03-segredo (CRON_SECRET comparado em tempo constante)  (repo: moviki-robo)  | 06/10/2026 plano 2.6
+// api/novo-parceiro.js | versao 2026-10-13-arroba (trava do @ do parceiro, P80)  (repo: moviki-robo)  | antes 2026-10-03-segredo
 // api/novo-parceiro.js  (repo: moviki-robo)
 //
 // Tem TRÊS papéis nesse arquivo (consolidados aqui de propósito — o plano
@@ -50,6 +50,7 @@ const { enviarBoasVindasParceiro } = require('../lib/boasVindasParceiro');
 const { buscarPerfil } = require('../lib/instagram');
 const { gravarEspelho, espelharPorUid } = require('../lib/espelhoParceiro');
 const meta = require('../lib/meta');
+const arr = require('../lib/arrobaParceiro');   // 13/10/2026 (P80): trava do @
 
 const PAINEL_URL = 'https://app.moviki.com.br/eikoadm01.html';
 const ORIGIN_OK  = 'https://app.moviki.com.br';
@@ -141,6 +142,14 @@ async function buscarInstagram(req, res) {
   // Meta as vezes cita o nosso id, entao nao pode ficar aberta pra qualquer um.
   const segredo = process.env.CRON_SECRET;
   const diag = bearerConfere(req, segredo); // 03/10: tempo constante (lib/segredo.js) // 23/09: diagnostico so com o segredo no cabecalho
+
+  /* 13/10/2026 (P80): @ reservado (TikTok, Instagram, Moviki, grande marca)
+     nem chega na Meta. Sem isso o cartao "e voce?" do cadastro mostrava a
+     foto e o selo de verificado do @tiktok para quem so digitou o nome. */
+  if (!diag && arr.reservado(q.instagram)) {
+    res.status(200).json({ ok: true, achou: false, motivo: 'reservado' });
+    return;
+  }
 
   try {
     const r = await buscarPerfil(admin, db, q.instagram, { ip: diag ? null : ip, semCache: diag });
@@ -278,7 +287,7 @@ async function atualizarEspelho(req, res) {
       const snap = await ref.get();
       const p    = snap.exists ? (snap.data() || {}) : null;
 
-      if (p && p.status === 'pendente' && p.aulasEm) {
+      if (p && p.status === 'pendente' && p.aulasEm && arr.podeAutoAprovar(p)) {   // 13/10 (P80): @ sem prova nao entra sozinho
         const auto = await lerAutoAprovacao();
         if (auto) {
           await aprovarParceiro(ref, p, 'aulas');
@@ -309,8 +318,13 @@ async function processarPendentes(req, res) {
   if (!viaCabecalho && !viaQuery) { res.status(401).json({ ok: false, erro: 'nao_autorizado' }); return; }
 
   try {
+    // 13/10/2026 (P80): roda UMA vez, na primeira varredura depois do deploy.
+    let auditoria = null;
+    try { auditoria = await auditarArrobasUmaVez(); }
+    catch (e) { console.error('[novo-parceiro] auditoria do @ falhou (segue a varredura):', e); }
+
     const auto = await lerAutoAprovacao();
-    if (!auto) { res.status(200).json({ ok: true, processados: 0, motivo: 'auto_desligado' }); return; }
+    if (!auto) { res.status(200).json({ ok: true, processados: 0, motivo: 'auto_desligado', auditoria }); return; }
 
     const limite = Date.now() - DELAY_MIN_MINUTOS * 60000;
     const snap = await db.collection('parceiros').where('status', '==', 'pendente').get();
@@ -330,6 +344,12 @@ async function processarPendentes(req, res) {
       const concluiu = !!p.aulasEm;
       if (!concluiu && (!criadoMs || criadoMs > limite)) continue; // ainda não passou o tempo mínimo
 
+      /* 13/10/2026 (P80): @ sem prova de posse, @ com nome de plataforma,
+         conta verificada ou conta grande ficam para o dono. Sem aviso aqui:
+         o Telegram do cadastro ja disse isso, e repetir a cada 5 min viraria
+         ruido. */
+      if (!arr.podeAutoAprovar(p)) continue;
+
       const parceiroRef = doc.ref;
       try {
         const boasVindasOk = await aprovarParceiro(parceiroRef, p, concluiu ? 'aulas' : 'tempo');
@@ -341,11 +361,170 @@ async function processarPendentes(req, res) {
       }
     }
 
-    res.status(200).json({ ok: true, processados, detalhes });
+    res.status(200).json({ ok: true, processados, detalhes, auditoria });
   } catch (e) {
     console.error('[novo-parceiro] Erro inesperado na varredura:', e);
     res.status(200).json({ ok: false });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Branch 4 (13/10/2026, P80): PROVA DE POSSE DO @ PELO CODIGO NA BIO.
+//
+// POST ?posse=1 { idToken, acao: 'codigo' | 'conferir' }
+//   codigo   -> devolve o codigo MVK-0000 deste parceiro (cria ou reaproveita;
+//               vence em 48 h). Fica em ig_posse/{uid}, so o Admin SDK le.
+//   conferir -> busca o @ DO CADASTRO na Meta (sem cache) e procura o codigo na
+//               bio. Achou: grava igConfirmado + igConfirmadoArroba + carimbo,
+//               regrava o espelho /v/ e avisa o dono. O parceiro pode tirar o
+//               codigo da bio depois.
+//
+// O @ conferido e SEMPRE o do banco, nunca o que o navegador manda: e isso que
+// impede alguem de "provar" um @ e usar outro.
+// ---------------------------------------------------------------------------
+async function provaDePosse(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
+  try {
+    const body    = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+    const idToken = String(body.idToken || '');
+    const acao    = String(body.acao || '');
+    if (!idToken || (acao !== 'codigo' && acao !== 'conferir')) { res.status(400).json({ ok: false }); return; }
+
+    let decoded;
+    try { decoded = await admin.auth().verifyIdToken(idToken); }
+    catch (_) { res.status(200).json({ ok: false, motivo: 'sessao' }); return; }
+    const uid = decoded.uid;
+
+    // Freio: a conferencia gasta cota da Meta. 12 por hora por conta.
+    if (!(await freioUid(admin, db, 'igposse', uid, 12, 3600000))) { res.status(429).json({ ok: false, motivo: 'freio' }); return; }
+
+    const ref  = db.collection('parceiros').doc(uid);
+    const snap = await ref.get();
+    if (!snap.exists) { res.status(200).json({ ok: false, motivo: 'sem_cadastro' }); return; }
+    const p = snap.data() || {};
+    const arroba = arr.normalizar(p.arroba);
+
+    if (!arroba)                 { res.status(200).json({ ok: false, motivo: 'sem_arroba' }); return; }
+    if (arr.reservado(arroba))   { res.status(200).json({ ok: false, motivo: 'reservado' }); return; }
+    if (arr.arrobaConfirmada(p)) { res.status(200).json({ ok: true, confirmado: true, arroba }); return; }
+
+    const posseRef = db.collection('ig_posse').doc(uid);
+    const ps = await posseRef.get();
+    const d  = ps.exists ? (ps.data() || {}) : null;
+    const criadoMs = d && d.criadoEm && typeof d.criadoEm.toMillis === 'function' ? d.criadoEm.toMillis() : 0;
+    const valido = !!(d && d.codigo && d.arroba === arroba && criadoMs && Date.now() - criadoMs < arr.CODIGO_HORAS * 3600000);
+
+    if (acao === 'codigo') {
+      if (valido) { res.status(200).json({ ok: true, confirmado: false, arroba, codigo: d.codigo }); return; }
+      const codigo = arr.gerarCodigo();
+      await posseRef.set({ codigo, arroba, criadoEm: admin.firestore.FieldValue.serverTimestamp(), tentativas: 0 });
+      res.status(200).json({ ok: true, confirmado: false, arroba, codigo });
+      return;
+    }
+
+    // acao === 'conferir'
+    if (!valido) { res.status(200).json({ ok: false, motivo: 'sem_codigo' }); return; }
+    await posseRef.update({ tentativas: admin.firestore.FieldValue.increment(1), ultimaEm: admin.firestore.FieldValue.serverTimestamp() });
+
+    const r = await buscarPerfil(admin, db, arroba, { semFoto: true, comBio: true });
+    if (!r.ok)    { res.status(200).json({ ok: false, motivo: r.motivo === 'arroba_invalido' ? 'arroba_invalido' : 'meta_fora' }); return; }
+    if (!r.achou) { res.status(200).json({ ok: false, motivo: 'nao_profissional' }); return; }
+    if (!arr.bioTemCodigo(r.bio, d.codigo)) { res.status(200).json({ ok: false, motivo: 'codigo_nao_achado', codigo: d.codigo }); return; }
+
+    const revisao = arr.motivosRevisao(Object.assign({}, p, { igVerificado: r.verificado === true, igSeguidores: Number(r.seguidores || 0) }));
+    const novo = {
+      igConfirmado: true,
+      igConfirmadoArroba: arroba,
+      igConfirmadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      igNome: r.nome || '',
+      igSeguidores: Number(r.seguidores || 0),
+      igPosts: Number(r.posts || 0),
+      igVerificado: r.verificado === true,
+      igConferidoEm: admin.firestore.FieldValue.serverTimestamp(),
+      arrobaRevisao: revisao,
+    };
+    await ref.update(novo);
+    try { await posseRef.delete(); } catch (_) {}
+
+    // O espelho publico passa a mostrar o @ (e a foto do Instagram pela /v/).
+    try { await gravarEspelho(admin, db, Object.assign({}, p, novo, { igConfirmado: true, igConfirmadoArroba: arroba })); }
+    catch (e) { console.error('[novo-parceiro] espelho apos a prova falhou (segue):', e); }
+
+    // Outro parceiro ja tinha provado este mesmo @? So avisa: quem tem a bio agora e o dono da conta.
+    let outro = '';
+    try {
+      const q = await db.collection('parceiros').where('igConfirmadoArroba', '==', arroba).limit(3).get();
+      const ids = q.docs.map(x => x.id).filter(x => x !== uid);
+      if (ids.length) outro = '\n⚠️ Este @ já tinha sido provado por outro cadastro (uid ' + ids.join(', ') + '). Confira.';
+    } catch (_) {}
+
+    await enviarTelegram(
+      '🔑 Parceiro provou o @ do Instagram\n\n' +
+      'Nome: ' + (p.nome || 'sem nome') + '\n' +
+      '@' + arroba + (r.verificado ? ' ✔️' : '') + ' — ' + Number(r.seguidores || 0).toLocaleString('pt-BR') + ' seguidores\n' +
+      (p.slug ? 'Apelido: /p/' + p.slug + '\n' : '') +
+      'Status do cadastro: ' + (p.status || '?') +
+      (revisao.length ? '\n⚠️ Continua com você: ' + revisao.map(m => arr.ROTULO[m] || m).join(', ') : '') +
+      outro + '\n\nVer no painel:\n' + PAINEL_URL
+    );
+
+    res.status(200).json({ ok: true, confirmado: true, arroba, revisao });
+  } catch (e) {
+    console.error('[novo-parceiro] Erro na prova de posse:', e);
+    res.status(200).json({ ok: false, motivo: 'falha' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AUDITORIA UNICA (13/10/2026, P80) — roda na primeira varredura depois do
+// deploy e marca sistema/arroba_trava_v1 para nunca mais rodar.
+//
+// 1) Regrava o espelho publico de todo parceiro que ja tem espelho: o @ sem
+//    prova SAI da pagina /v/ (e, com ele, a foto puxada do Instagram).
+// 2) Manda ao dono no Telegram a lista de quem precisa de olho: @ reservado,
+//    conta verificada, conta grande ou nome de plataforma no @.
+// Nao chama a Meta: usa os campos ig* ja gravados no cadastro.
+// ---------------------------------------------------------------------------
+async function auditarArrobasUmaVez() {
+  const marcaRef = db.collection('sistema').doc('arroba_trava_v1');
+  const m = await marcaRef.get();
+  if (m.exists) return null;
+  await marcaRef.set({ iniciadoEm: admin.firestore.FieldValue.serverTimestamp() });
+
+  const snap = await db.collection('parceiros').get();
+  let espelhos = 0, comArroba = 0, confirmados = 0;
+  const alerta = [];
+  for (const doc of snap.docs) {
+    const p = doc.data() || {};
+    if (p.arroba) comArroba++;
+    if (arr.arrobaConfirmada(p)) confirmados++;
+    const motivos = arr.reservado(p.arroba) ? ['reservado'] : arr.motivosRevisao(p);
+    if (motivos.length && p.status !== 'recusado') {
+      alerta.push('• ' + (p.nome || doc.id) + ' — ' + String(p.arroba || '') + ' (' + (p.status || '?') + '): ' +
+        motivos.map(x => x === 'reservado' ? 'nome reservado' : (arr.ROTULO[x] || x)).join(', '));
+    }
+    if (p.slug) {
+      try {
+        const pub = await db.collection('parceiros_publicos').doc(String(p.slug)).get();
+        if (pub.exists) { await gravarEspelho(admin, db, p); espelhos++; }
+      } catch (e) { console.error('[novo-parceiro] auditoria: espelho falhou', doc.id, e && e.message); }
+    }
+  }
+
+  await marcaRef.set({
+    feitoEm: admin.firestore.FieldValue.serverTimestamp(),
+    parceiros: snap.size, comArroba, confirmados, espelhos, alertas: alerta.length,
+  });
+
+  await enviarTelegram(
+    '🔒 Trava do @ do parceiro ligada (P80)\n\n' +
+    'Parceiros: ' + snap.size + ' · com @: ' + comArroba + ' · @ já provado: ' + confirmados + '\n' +
+    'Páginas /v/ regravadas: ' + espelhos + ' (o @ sem prova saiu delas)\n\n' +
+    (alerta.length ? 'Precisam do seu olho:\n' + alerta.slice(0, 25).join('\n') + (alerta.length > 25 ? '\n… e mais ' + (alerta.length - 25) : '')
+                   : 'Nenhum cadastro com @ reservado, verificado ou grande.') +
+    '\n\nPainel:\n' + PAINEL_URL
+  );
+  return { parceiros: snap.size, comArroba, confirmados, espelhos, alertas: alerta.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +546,7 @@ module.exports = async (req, res) => {
   if (String(q.processarPendentes || '') === '1') { await processarPendentes(req, res); return; }
   if (String(q.instagram || '') !== '')           { await buscarInstagram(req, res);    return; }
   if (String(q.espelho || '') === '1')            { await atualizarEspelho(req, res);   return; }
+  if (String(q.posse || '') === '1')              { await provaDePosse(req, res);       return; }   // 13/10/2026 (P80)
 
   if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
 
@@ -394,6 +574,29 @@ module.exports = async (req, res) => {
     const nome = p.nome || 'Parceiro sem nome';
     const slug = p.slug || '';
 
+    /* 2a) 13/10/2026 (P80) — @ RESERVADO: recusado na hora.
+       Caso real de 12/10: parceiro cadastrado com o @ "TikTok". Ninguem
+       legitimo se cadastra como TikTok, Instagram, Moviki ou Nike; quem tenta
+       e golpe de credibilidade. Recusa pelo Admin SDK (status so o robo
+       escreve), sem espelho publico e com aviso ao dono. */
+    if (p.arroba && arr.reservado(p.arroba)) {
+      await parceiroRef.update({
+        status: 'recusado',
+        recusadoEm: admin.firestore.FieldValue.serverTimestamp(),
+        recusadoPor: 'automatico-arroba',
+        recusaMotivo: 'arroba_reservado',
+      });
+      await enviarTelegram(
+        '⛔ Cadastro de parceiro RECUSADO na hora\n\n' +
+        'Nome: ' + nome + '\n' +
+        'Usou o @: ' + String(p.arroba).slice(0, 40) + ' (nome reservado de plataforma ou marca)\n' +
+        (slug ? 'Apelido: /p/' + slug + '\n' : '') +
+        '\nSe foi engano, reative no painel:\n' + PAINEL_URL
+      );
+      res.status(200).json({ ok: true, status: 'recusado', motivo: 'arroba_reservado' });
+      return;
+    }
+
     // 2b) CARIMBO DO INSTAGRAM (Regra de Ouro #1: dado de valor é escrito pelo
     // servidor, nunca pelo navegador).
     //
@@ -420,12 +623,16 @@ module.exports = async (req, res) => {
         const r = await buscarPerfil(admin, db, p.arroba, { semFoto: true });
         if (r.ok && r.achou) {
           ig = r;
+          const revisao = arr.motivosRevisao(Object.assign({}, p, {
+            igVerificado: r.verificado === true, igSeguidores: Number(r.seguidores || 0),
+          }));
           await parceiroRef.update({
             igNome:        r.nome || '',
             igSeguidores:  Number(r.seguidores || 0),
             igPosts:       Number(r.posts || 0),
             igVerificado:  r.verificado === true,
             igConferidoEm: admin.firestore.FieldValue.serverTimestamp(),
+            arrobaRevisao: revisao,   // 13/10 (P80): o painel do dono mostra o motivo
           });
         }
       } catch (e) {
@@ -441,6 +648,17 @@ module.exports = async (req, res) => {
         ' — ' + Number(ig.seguidores || 0).toLocaleString('pt-BR') + ' seguidores\n'
       : (p.arroba ? String(p.arroba) + ' (não confirmado no Instagram)\n' : '');
 
+    /* 13/10/2026 (P80): o @ que o parceiro digitou ainda NAO e prova de que a
+       conta e dele. O aviso diz isso com todas as letras, e diz por que ele
+       nao sera aprovado sozinho. */
+    const pRev = ig ? Object.assign({}, p, { igVerificado: ig.verificado === true, igSeguidores: Number(ig.seguidores || 0) }) : p;
+    const motivos = arr.motivosRevisao(pRev);
+    const linhaPosse = p.arroba
+      ? (motivos.length
+          ? '⚠️ Análise sua: ' + motivos.map(m => arr.ROTULO[m] || m).join(', ') + '. Não entra na aprovação automática.\n'
+          : '🔑 @ ainda sem prova de posse (código na bio). Só entra na aprovação automática depois da prova.\n')
+      : '';
+
     // A aprovação automática NÃO acontece mais aqui na hora — só fica marcada
     // no aviso do Telegram. Quem de fato aprova (respeitando o tempo mínimo
     // de análise) é a varredura do branch 2, chamada pelo agendamento externo.
@@ -449,13 +667,13 @@ module.exports = async (req, res) => {
     const texto = auto
       ? '🔔 Novo parceiro no Moviki!\n\n' +
         'Nome: ' + nome + '\n' +
-        linhaIg +
+        linhaIg + linhaPosse +
         (slug ? 'Apelido: /p/' + slug + '\n' : '') +
-        'Status: pendente ⏳ (aprovação automática entra em até ' + DELAY_MIN_MINUTOS + ' min)\n\n' +
+        'Status: pendente ⏳ (' + (arr.podeAutoAprovar(pRev) ? 'aprovação automática entra em até ' + DELAY_MIN_MINUTOS + ' min' : 'esperando a prova do @ ou a sua aprovação') + ')\n\n' +
         'Ver no painel:\n' + PAINEL_URL
       : '🔔 Novo parceiro no Moviki!\n\n' +
         'Nome: ' + nome + '\n' +
-        linhaIg +
+        linhaIg + linhaPosse +
         (slug ? 'Apelido: /p/' + slug + '\n' : '') +
         'Status: pendente ⏳\n\n' +
         'Aprovar agora:\n' + PAINEL_URL;
