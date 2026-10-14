@@ -1,4 +1,5 @@
-// versao 2026-09-25-pendente (clicar em Assinar antes de confirmar o e-mail nao queima mais o teste)
+// versao 2026-10-14-provisorio (teste de 7 dias antes de confirmar o e-mail; confirmou, vira 30 dias contados do inicio)
+// anterior: 2026-09-25-pendente (clicar em Assinar antes de confirmar o e-mail nao queima mais o teste)
 // anterior: 2026-09-23-verificado (e-mail confirmado conferido no Firebase Auth, nao so no token)
 // POST /api/ativar-trial      (repo: moviki-robo · pasta: api/)
 // Da 30 dias de Pro gratis pro lojista que acabou de se cadastrar.
@@ -14,7 +15,9 @@
 //
 // Tres travas entram aqui, todas no servidor:
 //
-//   1. E-MAIL CONFIRMADO. Sem `email_verified` no token, nao concede — responde
+//   1. E-MAIL CONFIRMADO. (Desde 14/10/2026 vale so para os 30 dias: sem
+//      confirmar, o teste e PROVISORIO de 7 dias — ver o bloco de 14/10 abaixo.)
+//      Texto original: sem `email_verified` no token, nao concede — responde
 //      { pendenteVerificacao:true } e nao grava nada. O painel ja chama esta
 //      rota de novo a cada login enquanto nao ha assinatura (index.html, no
 //      onAuthStateChanged), entao o trial entra sozinho quando ele confirmar.
@@ -37,11 +40,31 @@
 //
 // Continua sendo idempotente e continua nunca lancando erro para o painel.
 // -------------------------------------------------------------------------
+//
+// 14/10/2026 (2026-10-14-provisorio) — TESTE PROVISORIO. Decisao do Paulo
+// (09/10, montado em 14/10): 4 de cada 10 cadastros paravam na confirmacao do
+// e-mail e saiam sem nunca ver o painel funcionando. A trava 1 mudou de lugar:
+//
+//   - SEM e-mail confirmado: 7 dias de teste, marcados `provisorio:true`.
+//     Vale cardapio, ferramentas do Pro e o ENSAIO (ninguem ve). NAO vale a
+//     live aberta ao publico (lib/livesessao.js, reservar) nem assinar (o
+//     criar-assinatura ja responde 403). As travas 2 e 3 continuam valendo.
+//     O hash do e-mail vai para `trials_provisorios/{hash}` e NAO para
+//     `trials_usados`: assim quem cria conta com o e-mail de outra pessoa nao
+//     queima o teste de 30 dias dela. `trials_provisorios` tambem nunca e
+//     apagado — e o que impede "apago a conta, crio de novo, mais 7 dias".
+//   - CONFIRMOU: o mesmo teste passa a valer 30 dias contados do INICIO do
+//     provisorio (no minimo 7 dias a partir da confirmacao, para quem confirma
+//     tarde) e o hash vai para `trials_usados`, como antes.
+// -------------------------------------------------------------------------
 
 const crypto = require('crypto');
 const { admin, db } = require('../lib/firebase');
 
 const DIAS_TRIAL = 30;
+const DIAS_PROVISORIO = 7;      // teste antes de confirmar o e-mail (14/10/2026)
+const DIAS_MINIMO_CONFIRMOU = 7; // quem confirma tarde ainda leva pelo menos isso
+const DIA_MS = 86400000;
 
 // Provedores de caixa descartavel mais usados no Brasil. A env acrescenta.
 const DESCARTAVEIS_BASE = [
@@ -88,6 +111,23 @@ function jaTemRegistro(snap) {
   return !!(d.vence_em || d.origem || d.ativo === true || d.testeAte);
 }
 
+function ehProvisorio(snap) {
+  return !!(snap && snap.exists && (snap.data() || {}).provisorio === true);
+}
+
+/* Milissegundos de um Timestamp do Firestore (ou 0). */
+function msDe(t) {
+  return (t && typeof t.toMillis === 'function') ? t.toMillis() : 0;
+}
+
+/* Fim do teste de quem confirmou o e-mail. Puro, testado em
+   testes/teste-provisorio.test.js. inicioMs = inicio do provisorio (0 = nao
+   havia provisorio, o teste comeca agora). */
+function venceConfirmado(inicioMs, agoraMs) {
+  const base = inicioMs > 0 ? inicioMs : agoraMs;
+  return Math.max(base + DIAS_TRIAL * DIA_MS, agoraMs + DIAS_MINIMO_CONFIRMOU * DIA_MS);
+}
+
 function hashEmail(emailNorm) {
   const sal = process.env.TRIAL_HASH_SAL || 'moviki-trial-v1';
   return crypto.createHash('sha256').update(sal + '|' + emailNorm).digest('hex');
@@ -126,7 +166,8 @@ module.exports = async (req, res) => {
     // dias para sempre. Registro com vence_em (teste ja dado ou plano ja pago),
     // com origem, ou ativo continua contando como "ja existe".
     const snap = await ref.get();
-    if (jaTemRegistro(snap)) return res.status(200).json({ ok: true, jaExiste: true });
+    const eraProvisorio = ehProvisorio(snap);
+    if (jaTemRegistro(snap) && !eraProvisorio) return res.status(200).json({ ok: true, jaExiste: true });
 
     // ---- TRAVA 1: e-mail confirmado ----
     // Login pelo Google ja chega verificado. Cadastro por e-mail/senha nao —
@@ -135,22 +176,24 @@ module.exports = async (req, res) => {
     // 23/09/2026 (2026-09-23-verificado): o token do navegador vale 1 hora e
     // carrega o `email_verified` do momento em que foi emitido. Quem acabou
     // de clicar no link de confirmacao chegava aqui com o token velho
-    // ("nao confirmado") e ficava ate 1h no Basico, com o cardapio travado —
-    // justo na primeira visita vinda do anuncio de "30 dias gratis".
-    // Agora, se o token diz "nao confirmado", o robo pergunta ao proprio
-    // Firebase Auth (fonte da verdade). Continua falhando FECHADO: sem
-    // confirmacao no Auth, nao concede.
+    // ("nao confirmado"). Agora, se o token diz "nao confirmado", o robo
+    // pergunta ao proprio Firebase Auth (fonte da verdade).
+    //
+    // 14/10/2026: sem confirmacao no Auth, o teste passa a ser PROVISORIO (7
+    // dias, sem live aberta ao publico e sem assinar) — ver o topo.
     let emailConta = dec.email;
-    if (dec.email_verified !== true) {
-      let verificadoNoAuth = false;
+    let verificado = dec.email_verified === true;
+    if (!verificado) {
       try {
         const u = await admin.auth().getUser(uid);
-        verificadoNoAuth = !!(u && u.emailVerified === true);
+        verificado = !!(u && u.emailVerified === true);
         if (u && u.email) emailConta = u.email;
-      } catch (_) { verificadoNoAuth = false; }
-      if (!verificadoNoAuth) {
-        return res.status(200).json({ ok: true, pendenteVerificacao: true });
-      }
+      } catch (_) { verificado = false; }
+    }
+
+    // Ja esta no provisorio e continua sem confirmar: nada muda.
+    if (eraProvisorio && !verificado) {
+      return res.status(200).json({ ok: true, jaExiste: true, provisorio: true });
     }
 
     const emailNorm = normalizarEmail(emailConta);
@@ -169,15 +212,16 @@ module.exports = async (req, res) => {
     // ---- TRAVA 2: este e-mail ja gastou o teste gratis alguma vez? ----
     const chave = hashEmail(emailNorm);
     const refUso = db.collection('trials_usados').doc(chave);
-
-    const vence = new Date();
-    vence.setDate(vence.getDate() + DIAS_TRIAL);
+    const refProv = db.collection('trials_provisorios').doc(chave);
+    const agora = Date.now();
 
     // Transacao: dois leitores simultaneos (duas abas, dois cliques) nao
     // conseguem conceder dois trials para o mesmo hash.
     const saida = await db.runTransaction(async (t) => {
-      const [a, u] = await Promise.all([t.get(ref), t.get(refUso)]);
-      if (jaTemRegistro(a)) return { jaExiste: true };
+      const [a, u, p] = await Promise.all([t.get(ref), t.get(refUso), t.get(refProv)]);
+      const aProv = ehProvisorio(a);
+      if (jaTemRegistro(a) && !aProv) return { jaExiste: true };
+      if (aProv && !verificado) return { jaExiste: true, provisorio: true };
 
       if (u.exists) {
         const antes = u.data() || {};
@@ -188,18 +232,60 @@ module.exports = async (req, res) => {
             motivo: 'email_reutilizado', uidAnterior: antes.uid,
             em: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
+          // Estava no provisorio: ele termina na data dele, sem virar 30 dias.
+          if (aProv) {
+            t.set(ref, { provisorio: admin.firestore.FieldValue.delete(), negadoEm: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
           return { negado: 'email_reutilizado' };
         }
       }
 
-      t.set(ref, {
+      // ---- SEM CONFIRMAR: teste provisorio de 7 dias ----
+      if (!verificado) {
+        if (p.exists) {
+          const antesP = p.data() || {};
+          // Outra conta ja levou o provisorio com este e-mail (conta apagada e
+          // criada de novo): sem segundo provisorio. Confirmando, leva os 30.
+          if (antesP.uid && antesP.uid !== uid) return { pendenteVerificacao: true, motivo: 'provisorio_usado' };
+        }
+        t.set(ref, {
+          plano: 'pro',
+          periodo: 'trial',
+          ativo: true,
+          origem: 'trial',
+          provisorio: true,
+          inicioTeste: admin.firestore.Timestamp.fromMillis(agora),
+          vence_em: admin.firestore.Timestamp.fromMillis(agora + DIAS_PROVISORIO * DIA_MS),
+          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // NUNCA APAGAR (mesmo motivo do trials_usados).
+        t.set(refProv, { uid, em: admin.firestore.FieldValue.serverTimestamp(), dominio }, { merge: true });
+        return { trial: true, provisorio: true, dias: DIAS_PROVISORIO };
+      }
+
+      // ---- CONFIRMADO: 30 dias (contados do inicio do provisorio, se houve) ----
+      const d = aProv ? (a.data() || {}) : {};
+      let inicioMs = 0;
+      if (aProv) inicioMs = msDe(d.inicioTeste) || (msDe(d.vence_em) ? msDe(d.vence_em) - DIAS_PROVISORIO * DIA_MS : 0);
+      const venceMs = venceConfirmado(inicioMs, agora);
+      const dados = {
         plano: 'pro',
         periodo: 'trial',
         ativo: true,
         origem: 'trial',
-        vence_em: admin.firestore.Timestamp.fromDate(vence),
+        inicioTeste: admin.firestore.Timestamp.fromMillis(inicioMs || agora),
+        vence_em: admin.firestore.Timestamp.fromMillis(venceMs),
         atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      };
+      if (aProv) {
+        // merge: guarda o que o provisorio ja tinha (lembretes, por exemplo).
+        dados.provisorio = admin.firestore.FieldValue.delete();
+        dados.confirmadoEm = admin.firestore.FieldValue.serverTimestamp();
+        t.set(ref, dados, { merge: true });
+      } else {
+        // Sem provisorio: substitui a pendencia do criar-assinatura, como antes.
+        t.set(ref, dados);
+      }
 
       // NUNCA APAGAR. Este documento e a memoria do teste gratis: se ele
       // sumir junto com a conta, o ciclo de contas novas volta a funcionar.
@@ -209,7 +295,7 @@ module.exports = async (req, res) => {
         dominio
       }, { merge: true });
 
-      return { trial: true };
+      return { trial: true, confirmado: aProv };
     });
 
     return res.status(200).json(Object.assign({ ok: true }, saida));
@@ -217,3 +303,5 @@ module.exports = async (req, res) => {
     return res.status(500).json({ erro: e.message || 'Erro ao ativar trial' });
   }
 };
+
+module.exports._t = { venceConfirmado, normalizarEmail, DIAS_PROVISORIO, DIAS_TRIAL };

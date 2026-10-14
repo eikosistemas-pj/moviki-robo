@@ -1,4 +1,4 @@
-// versao 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -42,6 +42,17 @@
 //   - volta (1 vez na vida): teste gratis acabou ha 2 a 45 dias e nao virou
 //     plano pago -> lembra que a conta continua e que a live segue no Premium.
 //   novEnsaio e volta respeitam o "nao quero mais dicas". Nenhum texto promete venda.
+//
+// 14/10/2026 — TESTE PROVISORIO (api/ativar-trial.js 2026-10-14-provisorio):
+//   quem nao confirmou o e-mail ganha 7 dias de teste (`provisorio:true`).
+//   - decidirFlag ignora o provisorio: nada de "seu teste acaba", sequencia da
+//     primeira live ou convite de volta para um e-mail que ninguem confirmou.
+//     Confirmou, o documento vira o teste normal de 30 dias e entra na regua.
+//   - conf1/conf2 dizem que o teste JA comecou e o que a confirmacao libera
+//     (30 dias, live aberta ao publico, assinar). Quem nao tem provisorio
+//     (conta anterior a 14/10 que nao voltou ao painel) segue com o texto antigo.
+//   - conf3 (novo, so para provisorio): a partir do 5o dia, 1 vez, "seu teste
+//     sem confirmacao acaba em 2 dias".
 //
 // Env no Vercel (moviki-robo): CRON_SECRET, RESEND_API_KEY, FIREBASE_SERVICE_ACCOUNT.
 // Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
@@ -145,6 +156,7 @@ const msDe = (t) => (t && typeof t.toMillis === 'function') ? t.toMillis() : (ty
    primeira live > novidade do ensaio. "volta" so existe com o teste vencido. */
 function decidirFlag(d, agora) {
   if (!d || d.gateway === 'paddle' || !d.vence_em || typeof d.vence_em.toMillis !== 'function') return null;
+  if (d.provisorio === true) return null;   // 14/10: e-mail nao confirmado — so os lembretes de confirmacao
   const vence = d.vence_em.toMillis();
   const dias = Math.ceil((vence - agora) / DIA_MS);
   const lembretes = d.lembretes || {};
@@ -188,6 +200,11 @@ function decidirConfirma(x, agora) {
   const idade = agora - em;
   if (idade < 3 * HORA_MS || idade > CONFIRMA_JANELA_DIAS * DIA_MS) return null;
   const l = (x && x.confirmaLembretes) || {};
+  /* 14/10: conf3, so para o teste provisorio (o chamador confere), do 5o dia em diante. */
+  if (idade >= 5 * DIA_MS) {
+    if (l.c3) return null;
+    if (l.c2) return 'c3';
+  }
   if (idade >= 24 * HORA_MS) {
     if (l.c2) return null;
     if (l.c1 && (agora - msDe(l.c1)) < 12 * HORA_MS) return null;
@@ -241,6 +258,15 @@ async function lembrarConfirmacao(enviarDeVerdade, API_KEY, agora) {
     if (!u || u.disabled || !email) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'sem_conta' }); continue; }
     if (u.emailVerified) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'ja_confirmou' }); continue; }
 
+    /* 14/10: o texto muda se o teste provisorio ja esta rodando; o conf3 so existe para ele. */
+    let prov = null;
+    try {
+      const a = await db.collection('assinaturas').doc(c.uid).get();
+      const ad = a.exists ? (a.data() || {}) : {};
+      if (ad.provisorio === true && ad.vence_em && typeof ad.vence_em.toMillis === 'function') prov = { venceMs: ad.vence_em.toMillis() };
+    } catch (_) {}
+    if (c.etapa === 'c3' && (!prov || prov.venceMs <= agora)) { out.detalhes.push({ uid: c.uid, flag: 'conf_c3', status: 'sem_provisorio' }); continue; }
+
     let neg = null;
     try { const n = await db.collection('negocios').doc(c.uid).get(); if (n.exists) neg = n.data() || {}; } catch (_) {}
     if (String((neg && neg.pais) || 'BR').toUpperCase() !== 'BR') { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'fora_do_brasil' }); continue; }
@@ -257,7 +283,7 @@ async function lembrarConfirmacao(enviarDeVerdade, API_KEY, agora) {
     if (!link) { out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'sem_link' }); continue; }
 
     try {
-      if (!(await enviarResend(API_KEY, email, montarConfirmacao(c.etapa, nome, link), ''))) {
+      if (!(await enviarResend(API_KEY, email, montarConfirmacao(c.etapa, nome, link, prov, agora), ''))) {
         out.detalhes.push({ uid: c.uid, flag: 'conf_' + c.etapa, status: 'falha_envio' }); continue;
       }
       await c.ref.update({ ['confirmaLembretes.' + c.etapa]: admin.firestore.FieldValue.serverTimestamp() });
@@ -637,13 +663,29 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug, pago) {
 /* 08/10/2026 — lembrete de confirmar o e-mail. O link vem do Admin SDK
    (generateEmailVerificationLink), o mesmo tipo de link do e-mail do Firebase.
    E aviso da conta, nao dica: sem link de descadastro, e no maximo 2. */
-function montarConfirmacao(etapa, nome, link) {
-  const subject = etapa === 'c2' ? 'Seu teste grátis do Moviki está esperando' : 'Falta 1 passo: confirme seu e-mail';
-  const titulo  = etapa === 'c2' ? 'Seu teste grátis ainda não começou' : 'Falta 1 passo';
-  const paragrafos = [
-    'Você criou sua conta no Moviki, mas o e-mail ainda não foi confirmado. Assim que confirmar, seus 30 dias de teste grátis começam, com 2 lives pelo celular e o ensaio, que ninguém vê.',
-    'É só tocar no botão abaixo. Depois, volte ao painel: ele percebe a confirmação sozinho.',
-  ];
+function montarConfirmacao(etapa, nome, link, prov, agora) {
+  let subject, titulo, paragrafos;
+  if (prov) {
+    /* 14/10: teste provisorio rodando. Conta os dias que faltam dele. */
+    const falta = Math.max(1, Math.ceil((prov.venceMs - (agora || Date.now())) / DIA_MS));
+    const quando = falta === 1 ? 'amanhã' : 'em ' + falta + ' dias';
+    subject = etapa === 'c3' ? 'Seu teste do Moviki acaba ' + quando + ': confirme o e-mail'
+            : etapa === 'c2' ? 'Confirme o e-mail e ganhe os 30 dias do Moviki'
+            : 'Seu teste já começou: falta confirmar o e-mail';
+    titulo = etapa === 'c3' ? 'Seu teste acaba ' + quando : 'Seu teste grátis já começou';
+    paragrafos = [
+      'Seu painel no Moviki já está liberado, mas o e-mail ainda não foi confirmado. Sem a confirmação, o teste vale só 7 dias e acaba ' + quando + '.',
+      'Confirmando, o teste passa a valer 30 dias contados do dia em que você criou a conta, a live fica aberta para os seus clientes e você pode assinar um plano quando quiser.',
+      'É só tocar no botão abaixo. Depois, volte ao painel: ele percebe a confirmação sozinho.',
+    ];
+  } else {
+    subject = etapa === 'c2' ? 'Seu teste grátis do Moviki está esperando' : 'Falta 1 passo: confirme seu e-mail';
+    titulo  = etapa === 'c2' ? 'Seu teste grátis ainda não começou' : 'Falta 1 passo';
+    paragrafos = [
+      'Você criou sua conta no Moviki, mas o e-mail ainda não foi confirmado. Assim que confirmar, seus 30 dias de teste grátis começam, com 2 lives pelo celular e o ensaio, que ninguém vê.',
+      'É só tocar no botão abaixo. Depois, volte ao painel: ele percebe a confirmação sozinho.',
+    ];
+  }
   const pHtml = paragrafos.map(t => '<p style="margin:0 0 16px">' + esc(t) + '</p>').join('');
   const html = `<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
