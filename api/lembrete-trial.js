@@ -1,4 +1,4 @@
-// versao 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -54,6 +54,14 @@
 //   - conf3 (novo, so para provisorio): a partir do 5o dia, 1 vez, "seu teste
 //     sem confirmacao acaba em 2 dias".
 //
+// 17/10/2026 — LOJISTA-PARCEIRO EM ATRASO (lib/comissaoRetida.js):
+//   mensalidade de plano pago vencida = comissao retida por 30 dias. Este robo
+//   (a) marca como perdida a retida que passou do prazo e avisa o parceiro 1
+//   vez; (b) manda o e-mail do atraso com a CONTAGEM REGRESSIVA no fim, quando
+//   faltam 30, 21, 14, 7, 3 e 1 dia (marca em lembretes.atrasoParc, por
+//   atraso). So para parceiro APROVADO. Nao respeita o "nao quero dicas":
+//   e aviso da conta, como o de cobranca.
+//
 // Env no Vercel (moviki-robo): CRON_SECRET, RESEND_API_KEY, FIREBASE_SERVICE_ACCOUNT.
 // Testar (simula, nunca envia): GET ?dry=1 com o cabecalho Authorization: Bearer <CRON_SECRET> (desde 23/09 o segredo nao vale mais na URL)
 
@@ -61,6 +69,7 @@ const { admin, db } = require('../lib/firebase');
 const { bearerConfere } = require('../lib/segredo');
 const { normalizarApelidos } = require('../lib/trocaApelido');
 const crypto = require('crypto');
+const retida = require('../lib/comissaoRetida');
 
 const EMAIL_FROM = 'Moviki <suporte@moviki.com.br>';
 const PAINEL_URL = 'https://app.moviki.com.br';
@@ -409,18 +418,205 @@ module.exports = async (req, res) => {
       }
     }
 
+    /* 17/10: lojista-parceiro em atraso — comissao perdida e contagem
+       regressiva. Nunca derruba os outros lembretes. */
+    let atrasoParceiros = null;
+    try { atrasoParceiros = await avisarAtrasoParceiros(snap, enviarDeVerdade, API_KEY, agora); resultado.enviados += atrasoParceiros.enviados; }
+    catch (e) { console.error('avisarAtrasoParceiros erro:', e); atrasoParceiros = { erro: true }; }
+
     /* 08/10: lembrete de confirmar o e-mail (quem nao confirmou nao tem
        assinaturas/{uid}, por isso nao passou pelo laco acima). */
     let confirmacao = null;
     try { confirmacao = await lembrarConfirmacao(enviarDeVerdade, API_KEY, agora); resultado.enviados += confirmacao.enviados; }
     catch (e) { console.error('lembrarConfirmacao erro:', e); confirmacao = { erro: true }; }
 
-    res.status(200).json({ ok: true, ...resultado, confirmacao, apelidos });
+    res.status(200).json({ ok: true, ...resultado, confirmacao, atrasoParceiros, apelidos });
   } catch (e) {
     console.error('lembrete erro:', e);
     res.status(500).json({ ok: false, erro: 'erro interno' });
   }
 };
+
+/* 17/10/2026 — lojista-parceiro em atraso. snap = todas as assinaturas (o
+   laco principal ja leu). */
+async function dadosDoParceiro(uid) {
+  const p = await db.collection('parceiros').doc(uid).get();
+  if (!p.exists) return null;
+  const pd = p.data() || {};
+  if (pd.status !== 'aprovado') return null;
+  let neg = {};
+  try { const n = await db.collection('negocios').doc(uid).get(); if (n.exists) neg = n.data() || {}; } catch (_) {}
+  if (String(neg.pais || 'BR').toUpperCase() !== 'BR') return null;
+  let email = '';
+  try { const u = await admin.auth().getUser(uid); email = String(u.email || '').trim(); } catch (_) {}
+  if (!email) return null;
+  const nome = String(pd.nome || neg.nome || 'Olá').trim() || 'Olá';
+  return { email, nome };
+}
+
+async function avisarAtrasoParceiros(snap, enviarDeVerdade, API_KEY, agora) {
+  const r = { enviados: 0, perdidasAvisadas: 0, detalhes: [] };
+
+  // (a) passou dos 30 dias: perdida + aviso unico (a troca de status e a trava).
+  const perdidas = await retida.vencerRetidas(db, admin, agora, enviarDeVerdade);
+  for (const uid of Object.keys(perdidas)) {
+    const info = perdidas[uid];
+    const p = await dadosDoParceiro(uid);
+    if (!p) { r.detalhes.push({ uid, tipo: 'perdida', status: 'sem_parceiro_ou_email' }); continue; }
+    if (!enviarDeVerdade) { r.detalhes.push({ uid, tipo: 'perdida', valor: info.valor, email: mascara(p.email), status: 'simulado' }); continue; }
+    if (await enviarResend(API_KEY, p.email, montarComissaoPerdida(p.nome, info.qtd, info.valor, info.prazoMs), '')) {
+      r.enviados++; r.perdidasAvisadas++; r.detalhes.push({ uid, tipo: 'perdida', status: 'enviado' });
+    } else r.detalhes.push({ uid, tipo: 'perdida', status: 'falha_envio' });
+  }
+
+  // (b) dentro dos 30 dias: contagem regressiva nos marcos.
+  for (const docu of snap.docs) {
+    const d = docu.data() || {};
+    if (!d.atrasoDesde || d.gateway === 'paddle') continue;
+    const sit = retida.avaliarSituacao(true, d, agora);
+    if (!sit.carencia) continue;
+    const etapa = retida.etapaAtraso(sit.prazoMs, agora);
+    if (!etapa) continue;
+    const marca = (d.lembretes || {}).atrasoParc || {};
+    const atrasoId = String(sit.inicioMs);
+    if (marca.id === atrasoId && Number(marca.etapa || 0) >= etapa) continue;
+    const uid = docu.id;
+    const p = await dadosDoParceiro(uid);
+    if (!p) continue;   // nao e parceiro aprovado: o atraso dele nao tem comissao em jogo
+    const dias = retida.diasRestantes(sit.prazoMs, agora);
+    const ret = await retida.totalRetido(db, uid);
+    if (!enviarDeVerdade) { r.detalhes.push({ uid, tipo: 'atraso', dias, retido: ret.valor, email: mascara(p.email), status: 'simulado' }); continue; }
+    const msg = montarAtrasoParceiro(p.nome, sit.inicioMs, sit.prazoMs, dias, ret);
+    if (!(await enviarResend(API_KEY, p.email, msg, ''))) { r.detalhes.push({ uid, tipo: 'atraso', status: 'falha_envio' }); continue; }
+    try { await docu.ref.update({ 'lembretes.atrasoParc': { id: atrasoId, etapa, em: admin.firestore.FieldValue.serverTimestamp() } }); } catch (e) { console.error('marca atrasoParc erro:', uid, e); }
+    r.enviados++; r.detalhes.push({ uid, tipo: 'atraso', dias, status: 'enviado' });
+  }
+  return r;
+}
+
+function dataBR(ms) {
+  const iso = new Date(ms - 3 * HORA_MS).toISOString();
+  return iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4);
+}
+function reais(v) {
+  return 'R$ ' + (Number(v) || 0).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+function moldura(blocoTopo, corpo, rodapeExtra) {
+  return `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#eef2f7;font-family:Arial,Helvetica,sans-serif;color:#1c2a3a">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f7;padding:24px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(20,40,80,.08)">
+        <tr><td style="background:linear-gradient(135deg,#0c2138,#0e2d54);padding:26px 30px;text-align:center">
+          <img src="${SITE}/logo.png" alt="Moviki" height="34" style="height:34px;display:inline-block">
+        </td></tr>
+        ${blocoTopo}
+        <tr><td style="padding:14px 34px 0;font-size:15px;line-height:1.6;color:#33465c">
+          ${corpo}
+          <p style="margin:0 0 6px;font-size:14px;color:#64748b">Qualquer dúvida, é só chamar a gente no WhatsApp:</p>
+          <p style="margin:0 0 24px;font-size:15px"><a href="${WPP_LINK}" style="color:#16a34a;font-weight:bold;text-decoration:none">${WPP_TEXTO}</a></p>
+        </td></tr>
+        ${rodapeExtra || ''}
+        <tr><td style="padding:20px 34px;border-top:1px solid #e4e9f0;text-align:center">
+          <p style="margin:0 0 4px;font-size:14px;color:#33465c;font-weight:bold">Equipe Moviki</p>
+          <p style="margin:0;font-size:12px;color:#94a3b8">Sua loja ao vivo, pelo celular.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+function botao(texto, url) {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 22px">
+            <tr><td style="border-radius:11px;background:linear-gradient(135deg,#0066FF,#0aa2c8)">
+              <a href="${url}" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none">${esc(texto)}</a>
+            </td></tr>
+          </table>`;
+}
+
+/* E-mail do atraso. A contagem regressiva fica NO FIM, como pediu o Paulo:
+   e a ultima coisa que ele le antes de fechar. Nenhum texto promete ganho. */
+function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
+  const d = Math.max(1, dias);
+  const prazo = dataBR(prazoMs);
+  const desde = dataBR(desdeMs);
+  const ultimo = d === 1;
+  const subject = ultimo ? 'Último dia para não perder suas comissões de parceiro'
+    : (d >= 22 ? 'Mensalidade em atraso: suas comissões de parceiro estão retidas'
+      : 'Faltam ' + d + ' dias para você perder suas comissões de parceiro');
+  const titulo = 'Sua mensalidade do Moviki está em atraso';
+  const temRetido = ret && ret.qtd > 0;
+  const linhaRetido = temRetido
+    ? ('Retido hoje: ' + reais(ret.valor) + ' em ' + ret.qtd + (ret.qtd === 1 ? ' comissão' : ' comissões') + '.')
+    : 'Nenhuma comissão retida até agora. As que surgirem durante o atraso também ficam retidas.';
+  const p1 = 'A mensalidade do seu plano venceu em ' + desde + ' e ainda não consta como paga. Como você também é parceiro do Moviki, as comissões das suas indicações ficam retidas enquanto o atraso durar.';
+  const p2 = 'Pagando até ' + prazo + ', tudo o que ficou retido é liberado sozinho no seu painel de parceiro. Depois dessa data, as comissões geradas durante o atraso são perdidas e não voltam.';
+  const p3 = 'Já pagou? Pode desconsiderar: a liberação acontece assim que o pagamento é confirmado.';
+
+  const urg = d <= 7;
+  const cor = urg ? '#dc2626' : '#d97706';
+  const fundo = urg ? '#fef2f2' : '#fffbeb';
+  const borda = urg ? '#fecaca' : '#fde68a';
+  const pct = Math.max(3, Math.min(100, Math.round((d / retida.PRAZO_DIAS) * 100)));
+  const contagem = `<tr><td style="padding:4px 34px 26px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${fundo};border:1px solid ${borda};border-radius:14px">
+            <tr><td style="padding:20px 18px 6px;text-align:center">
+              <p style="margin:0 0 4px;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:${cor};font-weight:bold">Contagem regressiva</p>
+              <p style="margin:0;font-size:46px;line-height:1.1;font-weight:bold;color:${cor}">${ultimo ? 'Último dia' : (d + ' dias')}</p>
+              <p style="margin:6px 0 14px;font-size:14px;color:#33465c">${ultimo ? 'para pagar sem perder as suas comissões de parceiro' : 'para as suas comissões de parceiro serem perdidas'}</p>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#e5e7eb;border-radius:6px;height:10px">
+                <tr><td width="${pct}%" style="background:${cor};border-radius:6px;height:10px;font-size:0;line-height:0">&nbsp;</td><td style="font-size:0;line-height:0">&nbsp;</td></tr>
+              </table>
+              <p style="margin:10px 0 14px;font-size:13px;color:#64748b">Prazo final: <b>${prazo}</b></p>
+            </td></tr>
+          </table>
+        </td></tr>`;
+
+  const corpo = `<p style="margin:0 0 16px">${esc(p1)}</p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0f6ff;border:1px solid #d6e4fb;border-radius:12px;margin:0 0 18px">
+            <tr><td style="padding:14px 18px;font-size:14px;line-height:1.6;color:#33465c"><b>${esc(linhaRetido)}</b></td></tr>
+          </table>
+          <p style="margin:0 0 20px">${esc(p2)}</p>
+          ${botao('Pagar minha mensalidade →', PAINEL_URL)}
+          <p style="margin:0 0 18px;font-size:13px;color:#64748b">${esc(p3)}</p>`;
+  const topo = `<tr><td style="padding:32px 34px 8px">
+          <h1 style="margin:0 0 8px;font-size:22px;color:#0c2138">Olá, ${esc(nome)}!</h1>
+          <p style="margin:0;font-size:17px;color:${cor};font-weight:bold">${esc(titulo)}</p>
+        </td></tr>`;
+  const html = moldura(topo, corpo, contagem);
+  const text = [
+    'Olá, ' + nome + '!', '', titulo + '.', '', p1, '', linhaRetido, '', p2, '',
+    'Pagar minha mensalidade: ' + PAINEL_URL, p3, '',
+    'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')', '',
+    '----------------------------------------',
+    'CONTAGEM REGRESSIVA: ' + (ultimo ? 'último dia' : ('faltam ' + d + ' dias')) + ' para as suas comissões de parceiro serem perdidas.',
+    'Prazo final: ' + prazo,
+    '----------------------------------------', '', 'Equipe Moviki',
+  ].join('\n');
+  return { subject, html, text };
+}
+
+function montarComissaoPerdida(nome, qtd, valor, prazoMs) {
+  const subject = 'O prazo acabou: comissões de parceiro perdidas';
+  const titulo = 'O prazo de 30 dias terminou';
+  const p1 = 'O prazo para pagar a mensalidade em atraso terminou em ' + dataBR(prazoMs) + '. ' +
+    qtd + (qtd === 1 ? ' comissão retida, de ' : ' comissões retidas, somando ') + reais(valor) + ', ' + (qtd === 1 ? 'foi perdida' : 'foram perdidas') + '.';
+  const p2 = 'Quando a sua mensalidade voltar a ficar em dia, as comissões das suas indicações voltam a entrar normalmente no seu painel de parceiro.';
+  const topo = `<tr><td style="padding:32px 34px 8px">
+          <h1 style="margin:0 0 8px;font-size:22px;color:#0c2138">Olá, ${esc(nome)}!</h1>
+          <p style="margin:0;font-size:17px;color:#dc2626;font-weight:bold">${esc(titulo)}</p>
+        </td></tr>`;
+  const corpo = `<p style="margin:0 0 16px">${esc(p1)}</p>
+          <p style="margin:0 0 20px">${esc(p2)}</p>
+          ${botao('Acessar meu painel →', PAINEL_URL)}`;
+  const html = moldura(topo, corpo, '');
+  const text = ['Olá, ' + nome + '!', '', titulo + '.', '', p1, '', p2, '', 'Acessar meu painel: ' + PAINEL_URL, '',
+    'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')', '', 'Equipe Moviki'].join('\n');
+  return { subject, html, text };
+}
 
 function mascara(e) {
   const [u, dom] = String(e).split('@'); if (!dom) return '***';
@@ -728,4 +924,4 @@ function montarConfirmacao(etapa, nome, link, prov, agora) {
   return { subject, html, text };
 }
 
-module.exports._t = { decidirFlag, decidirConfirma, montarAtivacao, montarConfirmacao, montarEmail, CORTE_NOVIDADE };
+module.exports._t = { decidirFlag, decidirConfirma, montarAtivacao, montarConfirmacao, montarEmail, CORTE_NOVIDADE, montarAtrasoParceiro, montarComissaoPerdida, avisarAtrasoParceiros };
