@@ -95,6 +95,8 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   conf(!d('comissoes/payL2_n1'), '2. em atraso a comissao NAO entra no saldo');
   const ret = d('comissoes_retidas/payL2_n1');
   conf(ret && ret.status === 'retida' && ret.valor === 10.49 && ret.prazoMs === ini + 30 * DIA, '2. comissao retida com prazo de 30 dias');
+  const esp = d('parceiros/P').retidoAtraso;
+  conf(esp && esp.valor === 10.49 && esp.qtd === 1 && esp.prazoMs === ini + 30 * DIA, '2. espelho no cadastro do parceiro (painel le daqui)');
   await evento('PAYMENT_CONFIRMED', 'payL2', 'L', 'subL');
   conf(Object.keys(Object.fromEntries(store)).filter((k) => k.startsWith('comissoes_retidas/')).length === 1, '2. reenvio do Asaas nao duplica a retida');
 
@@ -121,6 +123,7 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   conf(d('assinaturas/P').ativo === true && !('atrasoDesde' in d('assinaturas/P')), '2. pagou: plano volta e o atraso some');
   conf(d('comissoes/payL2_n1') && d('comissoes/payL2_n1').valor === 10.49 && d('comissoes_retidas/payL2_n1').status === 'liberada', '2. pagou no prazo: comissao liberada no saldo');
   conf(telegram.some((t) => /liberadas: 1/.test(t)), '2. Paulo avisado da liberacao');
+  conf(!('retidoAtraso' in d('parceiros/P')), '2. liberou: espelho some do painel');
 
   // ---------- 3. passou dos 30 dias: perdida ----------
   cenario();
@@ -130,6 +133,7 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   emails.length = 0;
   r = await cron();
   conf(d('comissoes_retidas/payL3_n1').status === 'perdida', '3. depois de 30 dias a retida vira perdida');
+  conf(!('retidoAtraso' in d('parceiros/P')), '3. perdeu: espelho some do painel');
   conf(emails.length === 1 && /perdidas/.test(emails[0].subject) && /R\$ 10,49/.test(emails[0].html), '3. aviso unico de comissao perdida');
   r = await cron();
   conf(emails.length === 1, '3. aviso de perda nao repete');
@@ -152,6 +156,7 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   await evento('PAYMENT_RECEIVED', 'payL6', 'L', 'subL');
   await evento('PAYMENT_REFUNDED', 'payL6', 'L', 'subL');
   conf(d('comissoes_retidas/payL6_n1').status === 'estornada', '5. estorno do indicado estorna a retida');
+  conf(!('retidoAtraso' in d('parceiros/P')), '5. estornou: espelho some do painel');
   await evento('PAYMENT_RECEIVED', 'payP6', 'P', 'subP', { dueDate: hojeBR() });
   conf(!d('comissoes/payL6_n1'), '5. estornada nao e liberada');
 
