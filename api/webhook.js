@@ -1,4 +1,5 @@
-// versao 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)  | 06/10/2026 plano 2.6
+// versao 2026-10-17-carencia (lojista-parceiro em atraso: comissao retida por 30 dias e liberada se ele pagar; atrasoDesde no vencimento; estorno alcanca a retida)
+// anterior: 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)  | 06/10/2026 plano 2.6
 // anterior: 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
 // anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
 // anterior: 2026-09-15-escopo (token com escopo, valor reconferido no Asaas)
@@ -15,6 +16,8 @@ const meta = require('../lib/meta');
 // 11/09/2026: pedidos pagos na live (checkout Pix das subcontas Enterprise).
 const checkout = require('../lib/checkout');
 const { asaas } = require('../lib/asaas');
+// 17/10/2026: carencia de 30 dias do lojista-parceiro em atraso.
+const retida = require('../lib/comissaoRetida');
 
 /* ===========================================================================
    15/09/2026 — ESCOPO DO TOKEN E VALOR RECONFERIDO NO ASAAS
@@ -218,27 +221,23 @@ async function resolverParceiro(slug) {
 // Parceiro PURO (afiliado/influenciador via seja-parceiro.html) nunca teve
 // negócio nem assinatura no Moviki -> não existe assinaturas/{puid} pra ele,
 // e a regra de "pagante" simplesmente não se aplica (ele não é lojista).
-async function parceiroPodeGanhar(puid) {
-  try {
-    // negocios/{puid} existe só pra quem já foi (ou é) lojista no Moviki.
-    // Se não existe, é parceiro puro (afiliado/influenciador) -> regra não se aplica.
-    const neg = await db.collection('negocios').doc(puid).get();
-    if (!neg.exists) return true;
-
-    // É lojista: só ganha comissão com assinatura ativa e paga (nunca trial).
-    // Sem assinaturas/{puid} (nunca ativou nem o trial) conta como Básico -> nega.
-    const a = await db.collection('assinaturas').doc(puid).get();
-    if (!a.exists) return false;
-    const d = a.data() || {};
-    const dentroDoPrazo = !d.vence_em || d.vence_em.toMillis() > Date.now();
-    return d.ativo === true && dentroDoPrazo && d.periodo !== 'trial';
-  } catch (e) {
-    // Erro ao checar -> nega por segurança (evita vazamento financeiro pra
-    // quem não deveria ganhar; melhor perder uma comissão pontual por falha
-    // técnica rara do que creditar quem não é pagante).
-    console.error('parceiroPodeGanhar erro (negando por segurança):', e);
-    return false;
+//
+// 17/10/2026: a checagem mudou para lib/comissaoRetida.js (situacaoParceiro).
+// Lojista-parceiro com a mensalidade em atraso ha MENOS de 30 dias nao perde
+// mais na hora: a comissao fica retida e e liberada se ele pagar no prazo.
+//
+// creditarOuReter decide o destino da comissao de UM parceiro: credita (em
+// dia), retem (atraso dentro dos 30 dias) ou nada (o resto). Devolve texto
+// vazio quando nao entrou em nenhum dos dois caminhos.
+async function creditarOuReter(o) {
+  const sit = await retida.situacaoParceiro(db, o.parceiroUid, Date.now());
+  if (sit.ok) { await creditarComissao(o); return 'creditada'; }
+  if (sit.carencia) {
+    const ok = await retida.reterComissao(db, admin, o, sit);
+    if (ok) console.warn('comissao retida (lojista-parceiro em atraso)', o.parceiroUid, o.payId, 'n' + o.nivel);
+    return 'retida';
   }
+  return '';
 }
 
 // Registra UMA comissão. O id é payId_nN (fixo): se o Asaas reenviar o mesmo
@@ -348,17 +347,27 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
       return;
     }
   } catch (e) { console.warn('comissao: nao consegui ler a conta no Auth', lojistaUid, e && e.message); }
-  if (p1 && p1.data.status === 'aprovado' && await parceiroPodeGanhar(p1.uid)) {
+  if (p1 && p1.data.status === 'aprovado') {
     // Nível do parceiro NESTE pagamento (conta o cliente que está pagando agora).
     // O percentual aplicado é o do nível no momento em que a mensalidade entra;
     // comissões já creditadas antes no mesmo mês não são recalculadas.
-    const ativos = await contarAtivosDoMes(p1.uid, competencia, lojistaUid);
-    const nv = nivelPorAtivos(ativos);
-    const pct1 = nv ? nv.pct : PCT_N1_BASE;
-    await creditarComissao({ parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: pct1, payId, competencia, liberaMs });
-    creditados.add(p1.uid);
-    await creditarMarco(p1.uid, slug1, nv, competencia);
-    await guardarNivel(p1.uid, nv, ativos);
+    // 17/10/2026: lojista-parceiro em atraso ha menos de 30 dias tem a comissao
+    // RETIDA (lib/comissaoRetida.js) — sem marco e sem subir de nivel ate pagar.
+    const sit1 = await retida.situacaoParceiro(db, p1.uid, Date.now());
+    if (sit1.ok || sit1.carencia) {
+      const ativos = await contarAtivosDoMes(p1.uid, competencia, lojistaUid);
+      const nv = nivelPorAtivos(ativos);
+      const pct1 = nv ? nv.pct : PCT_N1_BASE;
+      const o1 = { parceiroUid: p1.uid, parceiroSlug: slug1, lojistaUid, nivel: 1, base, pct: pct1, payId, competencia, liberaMs };
+      creditados.add(p1.uid);
+      if (sit1.ok) {
+        await creditarComissao(o1);
+        await creditarMarco(p1.uid, slug1, nv, competencia);
+        await guardarNivel(p1.uid, nv, ativos);
+      } else {
+        await retida.reterComissao(db, admin, o1, sit1);
+      }
+    }
   }
 
   // Níveis 2 e 3 (bônus único, só no 1º pagamento)
@@ -367,16 +376,14 @@ async function acumularComissoes(lojistaUid, periodo, pay) {
     let p2 = slug2 ? await resolverParceiro(slug2) : null;
     // Mesmo principio: o "de cima" tem que existir antes de quem ele indicou.
     if (p2 && p1 && p1.criadoMs && p2.criadoMs && p2.criadoMs > p1.criadoMs) p2 = null;
-    if (p2 && p2.uid !== lojistaUid && p2.data.status === 'aprovado' && !creditados.has(p2.uid) && await parceiroPodeGanhar(p2.uid)) {
-      await creditarComissao({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia, liberaMs });
-      creditados.add(p2.uid);
+    if (p2 && p2.uid !== lojistaUid && p2.data.status === 'aprovado' && !creditados.has(p2.uid)) {
+      if (await creditarOuReter({ parceiroUid: p2.uid, parceiroSlug: slug2, lojistaUid, nivel: 2, base, pct: 0.075, payId, competencia, liberaMs })) creditados.add(p2.uid);
     }
     const slug3 = p2 ? (p2.data.indicadoPor || '') : '';
     let p3 = slug3 ? await resolverParceiro(slug3) : null;
     if (p3 && p2 && p2.criadoMs && p3.criadoMs && p3.criadoMs > p2.criadoMs) p3 = null;
-    if (p3 && p3.uid !== lojistaUid && p3.data.status === 'aprovado' && !creditados.has(p3.uid) && await parceiroPodeGanhar(p3.uid)) {
-      await creditarComissao({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia, liberaMs });
-      creditados.add(p3.uid);
+    if (p3 && p3.uid !== lojistaUid && p3.data.status === 'aprovado' && !creditados.has(p3.uid)) {
+      if (await creditarOuReter({ parceiroUid: p3.uid, parceiroSlug: slug3, lojistaUid, nivel: 3, base, pct: 0.05, payId, competencia, liberaMs })) creditados.add(p3.uid);
     }
   }
 }
@@ -438,6 +445,8 @@ async function registrarPurchase(uid, plano, periodo, pay) {
 // Estorno/chargeback: anula (marca estornada) as comissões daquele pagamento.
 async function estornarComissoes(payId) {
   if (!payId) return;
+  // 17/10/2026: a comissao retida daquele pagamento tambem cai.
+  try { await retida.estornarRetidas(db, admin, payId); } catch (e) { console.error('estorno retida erro:', e); }
   const qs = await db.collection('comissoes').where('payId', '==', payId).get();
   if (qs.empty) return;
   const bat = db.batch();
@@ -993,6 +1002,8 @@ async function processarEvento(evento, ctx) {
       vence_em: admin.firestore.Timestamp.fromDate(vence),
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
     };
+    // 17/10/2026: pagou -> o atraso acabou (carencia do lojista-parceiro).
+    if (atualDoc.atrasoDesde) novoDoc.atrasoDesde = admin.firestore.FieldValue.delete();
     if (testeAte) novoDoc.testeAte = testeAte;
     if (!pularPlano) {
       await ref.set(novoDoc, { merge: true });
@@ -1016,6 +1027,19 @@ async function processarEvento(evento, ctx) {
     if (payIdLiga) {
       await db.collection('faturamento').doc(uid).set({ pagosLigados: { [payIdLiga]: admin.firestore.FieldValue.serverTimestamp() } }, { merge: true })
         .catch((e) => console.error('pagosLigados (ignorado):', e && e.message));
+    }
+
+    /* 17/10/2026 — o lojista que pagou pode ser PARCEIRO com comissao retida
+       pelo atraso: libera o que esta dentro dos 30 dias. Nunca derruba. */
+    if (!pularPlano) {
+      try {
+        const lib = await retida.liberarRetidas(db, admin, uid, creditarComissao, Date.now());
+        if (lib.liberadas || lib.perdidas) {
+          await avisarDono('💸 Lojista-parceiro pagou a mensalidade em atraso\n\nUid: ' + uid +
+            '\nComissoes liberadas: ' + lib.liberadas + ' (R$ ' + lib.valorLiberado.toFixed(2) + ')' +
+            (lib.perdidas ? '\nPerdidas (passaram dos 30 dias): ' + lib.perdidas + ' (R$ ' + lib.valorPerdido.toFixed(2) + ')' : ''));
+        }
+      } catch (le) { console.error('liberar retidas erro:', le); }
     }
 
     // Comissao do Programa de Parceiros. Roda depois da ativacao e NUNCA a
@@ -1060,10 +1084,20 @@ async function processarEvento(evento, ctx) {
         atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     } else {
-      await ref.set({
+      const corte = {
         ativo: false,
         atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
+      };
+      /* 17/10/2026 — inicio do ATRASO de plano pago: o vencimento da cobranca
+         que nao foi paga. Conta os 30 dias de carencia da comissao do
+         lojista-parceiro e a contagem regressiva do e-mail. Nao sobrescreve:
+         a 2a mensalidade vencida nao reinicia o prazo. */
+      if (tipo === 'PAYMENT_OVERDUE' && atualDoc.periodo && atualDoc.periodo !== 'trial' && !atualDoc.atrasoDesde) {
+        const dMs = Date.parse(String(pay.dueDate || '') + 'T12:00:00-03:00');
+        const iniMs = (Number.isFinite(dMs) && dMs <= Date.now()) ? dMs : Date.now();
+        corte.atrasoDesde = admin.firestore.Timestamp.fromMillis(iniMs);
+      }
+      await ref.set(corte, { merge: true });
     }
 
     // Estorno ou chargeback -> anula a comissao daquele pagamento (clawback).
