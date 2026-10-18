@@ -1,4 +1,5 @@
-// api/exclusoes.js | versao 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)  (repo: moviki-robo)
+// anterior: 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)
 // anterior: 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos) | 06/10/2026 plano 3.4 (aviso de exclusao)
 // anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
@@ -77,6 +78,8 @@ const DOCS_POR_UID = [
   'vip_canais',
   // 07/10/2026 (P75 fase 1): sessao do ensaio e marcos do lojista (primeira live, ensaios, primeira venda)
   'live_ensaios', 'marcos_lojista',
+  // 17/10/2026: @ do Instagram da loja e o item da fila Lojistas para seguir
+  'lojista_instagram', 'seguir_lojista',
 ];
 
 // Colecoes de topo que guardam o uid do lojista num CAMPO.

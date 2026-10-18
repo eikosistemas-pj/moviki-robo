@@ -1,4 +1,4 @@
-// api/financeiro.js  (repo: moviki-robo) | versao 2026-09-14-porta1
+// api/financeiro.js  (repo: moviki-robo) | versao 2026-10-17-seguir (acao loja_instagram: @ do Instagram da loja, lib/seguirLojista.js) | antes 2026-09-14-porta1
 //
 // PORTA DO LOJISTA E DO DONO — so acoes 'loja_*' e 'adm_*', todas com login.
 //
@@ -20,10 +20,17 @@
 //   loja_comprovante  link assinado do comprovante (20 minutos)
 //   loja_estado / loja_criar / loja_ligar   subconta (legado, Enterprise)
 //   adm_asaas         conferencia do dono
+//   loja_instagram    @ do Instagram da loja + o que falta para a loja ficar
+//                     completa (17/10/2026). NAO e dinheiro: e tratada aqui
+//                     antes do checkout e nunca chega no lib/checkout.js
+//                     (lib/seguirLojista.js, freio de 20 por hora por conta).
 //
 // O CORS e so do painel: pagina publica nao tem o que fazer nesta porta.
 
 const checkout = require('../lib/checkout');
+const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');
+const seguir = require('../lib/seguirLojista');
 
 const ORIGEM_OK = 'https://app.moviki.com.br';
 
@@ -49,6 +56,21 @@ module.exports = async (req, res) => {
        (fora do navegador) passa: quem protege ali e o idToken, nao o CORS. */
     const orig = String(req.headers.origin || '');
     if (orig && orig !== ORIGEM_OK) { res.status(403).json({ ok: false, erro: 'origem' }); return; }
+
+    /* 17/10/2026: @ do Instagram da loja. Ler o estado nao gasta freio;
+       salvar um @ gasta (cada salvamento consulta a Meta). */
+    if (acao === 'loja_instagram') {
+      let dec;
+      try { dec = await admin.auth().verifyIdToken(String(body.idToken || '')); }
+      catch (_) { res.status(401).json({ ok: false, erro: 'sessao' }); return; }
+      const salvando = body.arroba !== undefined && body.ler !== true;
+      if (salvando && !(await freioUid(admin, db, 'lojaig', dec.uid, 20, 3600000))) {
+        res.status(429).json({ ok: false, erro: 'freio', mensagem: 'Muitas tentativas seguidas. Tente de novo daqui a pouco.' }); return;
+      }
+      const r = await seguir.tratarLoja(dec.uid, body);
+      res.status(r.status).json(r.json);
+      return;
+    }
 
     await checkout.tratar(req, res, body);
   } catch (e) {
