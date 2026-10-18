@@ -1,4 +1,4 @@
-// versao 2026-10-17-subirplano (e-mails de fim de teste e o convite de volta ganham o link da aula de 1 minuto 'O que muda em cada plano', que abre no painel por ?aula=mod-subir-plano). Antes: 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-17-seguir (varredura da fila Lojistas para seguir: loja completa + lembrete diario de pendentes no Telegram, lib/seguirLojista.js). Antes: 2026-10-17-subirplano (e-mails de fim de teste e o convite de volta ganham o link da aula de 1 minuto 'O que muda em cada plano', que abre no painel por ?aula=mod-subir-plano). Antes: 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -70,6 +70,7 @@ const { bearerConfere } = require('../lib/segredo');
 const { normalizarApelidos } = require('../lib/trocaApelido');
 const crypto = require('crypto');
 const retida = require('../lib/comissaoRetida');
+const seguirLojista = require('../lib/seguirLojista');
 
 const EMAIL_FROM = 'Moviki <suporte@moviki.com.br>';
 const PAINEL_URL = 'https://app.moviki.com.br';
@@ -433,7 +434,14 @@ module.exports = async (req, res) => {
     try { confirmacao = await lembrarConfirmacao(enviarDeVerdade, API_KEY, agora); resultado.enviados += confirmacao.enviados; }
     catch (e) { console.error('lembrarConfirmacao erro:', e); confirmacao = { erro: true }; }
 
-    res.status(200).json({ ok: true, ...resultado, confirmacao, atrasoParceiros, apelidos });
+    /* 17/10: loja completa (ramo + 3 produtos com foto + @) entra na fila
+       "Lojistas para seguir" e avisa o Paulo no Telegram; pendente ha mais de
+       24 h volta num lembrete por dia. Nunca derruba os lembretes. */
+    let seguirLoj = null;
+    try { seguirLoj = await seguirLojista.varrer(agora, enviarDeVerdade); }
+    catch (e) { console.error('seguirLojista erro:', e); seguirLoj = { erro: true }; }
+
+    res.status(200).json({ ok: true, ...resultado, confirmacao, atrasoParceiros, apelidos, seguirLojista: seguirLoj });
   } catch (e) {
     console.error('lembrete erro:', e);
     res.status(500).json({ ok: false, erro: 'erro interno' });

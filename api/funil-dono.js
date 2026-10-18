@@ -1,4 +1,4 @@
-// api/funil-dono.js | versao 2026-10-09-origem (funil por origem do cadastro) | antes 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
+// api/funil-dono.js | versao 2026-10-17-seguir (fila Lojistas para seguir: acoes seguir_lista e seguir_feito) | antes 2026-10-09-origem (funil por origem do cadastro) | antes 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
 // FUNIL DO LOJISTA — P75, fase 1 (peca B5), 07/10/2026.
 //
 // O painel do dono (cartao "Funil do lojista", na Visao geral) mostra, semana
@@ -46,8 +46,9 @@ const { admin, db } = require('../lib/firebase');
 const { conferirAdmin } = require('../lib/admin');
 const { freioUid } = require('../lib/freio');
 const { origemDoAviso } = require('../lib/origem');
+const seguir = require('../lib/seguirLojista');
 
-const VERSAO = '2026-10-09-origem';
+const VERSAO = '2026-10-17-seguir';
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
 /* ----------------------------------------------------------------------
@@ -296,6 +297,17 @@ module.exports = async (req, res) => {
     catch (_) { res.status(401).json({ ok: false, erro: 'sessao' }); return; }
     const adm = await conferirAdmin(db, dec);
     if (!adm.ok) { res.status(adm.status).json({ ok: false, erro: adm.erro, mensagem: adm.mensagem }); return; }
+    /* 17/10/2026: fila "Lojistas para seguir" (lib/seguirLojista.js). Freio
+       proprio, mais largo: cada "Ja segui" e um clique. */
+    const acao = String(body.acao || '');
+    if (acao === 'seguir_lista' || acao === 'seguir_feito') {
+      if (!(await freioUid(admin, db, 'seguirdono', dec.uid, 200, 3600000))) {
+        res.status(429).json({ ok: false, erro: 'freio', mensagem: 'Muitas consultas seguidas. Tente de novo em alguns minutos.' }); return;
+      }
+      const r = acao === 'seguir_lista' ? await seguir.listar() : await seguir.marcarSeguido(String(body.uid || ''), dec.uid);
+      res.status(r.ok ? 200 : (r.erro === 'uid' ? 400 : r.erro === 'nao_encontrado' ? 404 : 500)).json(r);
+      return;
+    }
     if (!(await freioUid(admin, db, 'funildono', dec.uid, 30, 3600000))) {
       res.status(429).json({ ok: false, erro: 'freio', mensagem: 'Muitas consultas seguidas. Tente de novo em alguns minutos.' }); return;
     }
