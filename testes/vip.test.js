@@ -38,12 +38,26 @@ const EP2 = 'https://updates.push.services.mozilla.com/wpush/v2/xyz';
   store.set('negocios/' + UID, { nome: 'Perfumaria Teste', slug: 'perfumaria-teste' });
   const base = { lojistaUid: UID, nome: 'Rui Alves', aceite: true, origem: 'live' };
 
-  // 1. desligado por padrao
-  let r = await V.entrar(Object.assign({}, base, { email: 'rui@exemplo.com' }), '1.1.1.1');
-  conf(r.erro === 'vip_off', 'chave desligada recusa: ' + JSON.stringify(r));
+  // 1. P84 (17/10): ligada por padrao; o dono desliga com false
+  let r = await V.lojaVip(UID);
+  conf(r.ok && r.ligado === true, 'ligada por padrao: ' + JSON.stringify(r).slice(0, 80));
+  await T.admRecursos('donoXXXXXXXXXXXXX', { uid: UID, listaVip: false });
+  r = await V.entrar(Object.assign({}, base, { email: 'rui@exemplo.com' }), '1.1.1.1');
+  conf(r.erro === 'vip_off', 'dono desligou recusa: ' + JSON.stringify(r));
   r = await V.lojaVip(UID);
   conf(r.ok && r.ligado === false, 'painel diz desligado');
+  // teste gratis (plano pro, periodo trial) tem live: entra
+  store.set('assinaturas/' + UID, { ativo: true, plano: 'pro', periodo: 'trial' });
   await T.admRecursos('donoXXXXXXXXXXXXX', { uid: UID, listaVip: true });
+  r = await V.entrar(Object.assign({}, base, { nome: 'Teste', whatsapp: '31900001111' }), '1.1.9.1');
+  conf(r.ok, 'teste gratis recebe inscricao: ' + JSON.stringify(r));
+  let rt = await chamar({ acao: 'loja_vip', idToken: UID });
+  conf(rt.code === 200 && rt.body.ligado === true, 'teste gratis abre a Lista VIP no painel');
+  store.set('assinaturas/' + UID, { ativo: true, plano: 'pro', periodo: 'mensal' });
+  rt = await chamar({ acao: 'loja_vip', idToken: UID });
+  conf(rt.code === 403, 'Pro pago sem live nao abre');
+  for (const [k] of docsVip()) store.delete(k);
+  store.set('assinaturas/' + UID, { ativo: true, plano: 'premium' });
   conf(d('checkout_publico/' + UID).recursos.listaVip === true, 'espelho publico do recurso');
 
   // 2. validacoes
