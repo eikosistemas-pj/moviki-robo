@@ -1,4 +1,4 @@
-// versao 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-17-subirplano (e-mails de fim de teste e o convite de volta ganham o link da aula de 1 minuto 'O que muda em cada plano', que abre no painel por ?aula=mod-subir-plano). Antes: 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -74,6 +74,9 @@ const retida = require('../lib/comissaoRetida');
 const EMAIL_FROM = 'Moviki <suporte@moviki.com.br>';
 const PAINEL_URL = 'https://app.moviki.com.br';
 const SITE       = 'https://moviki.com.br';
+/* 17/10/2026 (subirplano): a aula de 1 minuto 'O que voce ganha subindo de plano' abre direto no painel. */
+const AULA_PLANOS = PAINEL_URL + '/?aula=mod-subir-plano';
+const AULA_PLANOS_HTML = '<p style="margin:0 0 22px;font-size:14px;text-align:center"><a href="' + AULA_PLANOS + '" style="color:#0066FF;font-weight:bold;text-decoration:none">&#9654; Veja em 1 minuto o que muda em cada plano</a></p>';
 const WPP_TEXTO  = '(41) 2018-6848';
 const WPP_LINK   = 'https://wa.me/554120186848';
 const DIA_MS     = 86400000;
@@ -690,6 +693,7 @@ function montarEmail(tipo, nome, dias) {
             </td></tr>
           </table>
 
+          ${pago ? '' : AULA_PLANOS_HTML}
           ${linhaPreco}
 
           <p style="margin:0 0 6px;font-size:14px;color:#64748b">Qualquer dúvida, é só chamar a gente no WhatsApp:</p>
@@ -714,6 +718,7 @@ function montarEmail(tipo, nome, dias) {
     (pago ? '- Sem interrupção pros seus clientes' : '- No Premium, a live continua liberada e o cardápio vende com Pix na sua conta'),
     '',
     (pago ? 'Acessar meu painel: ' : 'Assine agora: ') + PAINEL_URL,
+    (pago ? '' : 'Veja em 1 minuto o que muda em cada plano: ' + AULA_PLANOS),
     (pago ? '' : 'Premium R$ 69,90/mês, com live e venda pelo cardápio. O Pró (R$ 39,90/mês) não tem live.'),
     '',
     'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')',
@@ -828,6 +833,7 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug, pago) {
               <a href="${PAINEL_URL}" style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none">${esc(cta)}</a>
             </td></tr>
           </table>
+          ${tipo === 'volta' ? AULA_PLANOS_HTML : ''}
           <p style="margin:0 0 6px;font-size:14px;color:#64748b">Dúvida? Chame a gente no WhatsApp:</p>
           <p style="margin:0 0 24px;font-size:15px"><a href="${WPP_LINK}" style="color:#16a34a;font-weight:bold;text-decoration:none">${WPP_TEXTO}</a></p>
         </td></tr>
@@ -848,6 +854,7 @@ function montarAtivacao(tipo, nome, parar, diasRestantes, slug, pago) {
     ...passos.map((t, i) => (i + 1) + '. ' + limpar(t)),
     ...(extra ? ['', extra] : []),
     '', cta.replace(' →', '') + ': ' + PAINEL_URL,
+    ...(tipo === 'volta' ? ['Veja em 1 minuto o que muda em cada plano: ' + AULA_PLANOS] : []),
     '', 'Dúvida? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')',
     '', 'Equipe Moviki',
     ...(parar ? ['', 'Não quer mais receber dicas? ' + parar] : []),
