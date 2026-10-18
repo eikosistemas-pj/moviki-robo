@@ -73,6 +73,8 @@ const DOCS_POR_UID = [
   'checkout_publico', 'checkout_contas', 'vik_memoria', 'vik_reserva',
   // 03/10/2026 (P70): chaves de recurso e o freio dos avisos da Lista VIP
   'recursos', 'vip_avisos',
+  // 17/10/2026 (P84): canal externo da loja (WhatsApp/Telegram) da Lista VIP
+  'vip_canais',
   // 07/10/2026 (P75 fase 1): sessao do ensaio e marcos do lojista (primeira live, ensaios, primeira venda)
   'live_ensaios', 'marcos_lojista',
 ];

@@ -180,6 +180,35 @@ const EP2 = 'https://updates.push.services.mozilla.com/wpush/v2/xyz';
   conf(r.porOrigem.qr === 1 && r.porOrigem.link === 1 && r.porOrigem.pagina >= 1, 'contagem por origem: ' + JSON.stringify(r.porOrigem));
   conf(!docsVip().some(([, x]) => /script/.test(String(x.origem))), 'origem fora da lista vira pagina');
 
+  // 12c. P84: origem por rede, base por live e canal da loja
+  await V.entrar(Object.assign({}, base, { nome: 'Fabi', whatsapp: '31977773333', origem: 'tiktok' }), '2.2.3.1');
+  await V.entrar(Object.assign({}, base, { nome: 'Gil', whatsapp: '31977772222', origem: 'instagram' }), '2.2.3.2');
+  await V.entrar(Object.assign({}, base, { nome: 'Iara', whatsapp: '31977779999', push: { endpoint: 'https://fcm.googleapis.com/fcm/send/iara1' } }), '2.2.3.5');
+  r = await V.lojaVip(UID);
+  conf(r.porOrigem.tiktok === 1 && r.porOrigem.instagram === 1, 'contagem por rede: ' + JSON.stringify(r.porOrigem));
+  conf(r.redes && /\?vip=tiktok$/.test(r.redes.tiktok) && /perfumaria-teste/.test(r.redes.kwai), 'links por rede');
+  conf(Array.isArray(r.lives) && r.lives.length >= 1 && r.lives[0].pessoas >= 1 && /^\d{4}-\d{2}-\d{2}$/.test(r.lives[0].dia), 'base por live: ' + JSON.stringify(r.lives));
+  conf(!docsVip().some(([, x]) => x.origem === 'tiktok' && x.liveDia), 'so quem entra pela live leva liveDia');
+  conf(r.canal === null, 'sem canal por padrao');
+  const CV = V._t.canalValido;
+  conf(CV('https://whatsapp.com/channel/0029VaABCDEFghijk12345').tipo === 'wpp_canal', 'canal do WhatsApp');
+  conf(CV('chat.whatsapp.com/AbCdEfGhIjKlMn123?mode=ac_t').url === 'https://chat.whatsapp.com/AbCdEfGhIjKlMn123', 'grupo normalizado');
+  conf(CV('https://t.me/lojadamaria').tipo === 'telegram' && CV('https://t.me/+AbCdEfGhIjK12').tipo === 'telegram', 'telegram');
+  conf(CV('https://evil.com/whatsapp.com/channel/0029VaABCDEFghijk12345') === null, 'dominio falso recusado');
+  conf(CV('javascript:alert(1)') === null && CV('https://wa.me/5511999999999') === null && CV('https://t.me/a') === null, 'formatos fora recusados');
+  r = await V.lojaCanal(UID, { url: 'https://phishing.example/x' });
+  conf(r.erro === 'vip_canal', 'lojista nao grava link qualquer');
+  let res2 = await chamar({ acao: 'loja_vip_canal', idToken: UID, dados: { url: 'https://whatsapp.com/channel/0029VaABCDEFghijk12345' } });
+  conf(res2.code === 200 && res2.body.canal.tipo === 'wpp_canal' && d('vip_canais/' + UID).url, 'grava canal pela porta do lojista');
+  r = await V.entrar(Object.assign({}, base, { nome: 'Hugo', whatsapp: '31977771111', origem: 'kwai' }), '2.2.3.3');
+  conf(r.ok && r.canal && r.canal.url === 'https://whatsapp.com/channel/0029VaABCDEFghijk12345', 'canal so depois da inscricao');
+  r = await V.entrar(Object.assign({}, base, { aceite: false, whatsapp: '31977770000' }), '2.2.3.4');
+  conf(!r.canal, 'sem aceite nao ve canal');
+  r = await V.lojaVip(UID);
+  conf(r.canal && r.canal.tipo === 'wpp_canal', 'painel ve o canal');
+  r = await V.lojaCanal(UID, { url: '' });
+  conf(r.ok && !d('vip_canais/' + UID), 'apagar canal');
+
   // 13. e-mail sem confirmar some em 7 dias
   await V.entrar(Object.assign({}, base, { email: 'velho@exemplo.com' }), '1.1.1.9');
   const vel = docsVip().find(([, x]) => x.email === 'velho@exemplo.com');
