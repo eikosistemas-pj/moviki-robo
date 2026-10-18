@@ -389,7 +389,7 @@ module.exports = async (req, res) => {
       const dic = Math.max(dias, 0);
       const parar = ehAtivacao ? linkParar(uid) : '';
       const ehPagoComLive = flag === 'novEnsaio' && d.periodo !== 'trial';
-      const msg = ehAtivacao ? montarAtivacao(flag, nome, parar, dic, negDados && negDados.slug, ehPagoComLive) : montarEmail(flag, nome, dic);
+      const msg = termoDoRamo(ehAtivacao ? montarAtivacao(flag, nome, parar, dic, negDados && negDados.slug, ehPagoComLive) : montarEmail(flag, nome, dic), negDados);
 
       if (!enviarDeVerdade) {
         resultado.detalhes.push({ uid, flag, dias, diaTeste, email: mascara(email), status: 'simulado' });
@@ -632,6 +632,24 @@ function montarComissaoPerdida(nome, qtd, valor, prazoMs) {
 function mascara(e) {
   const [u, dom] = String(e).split('@'); if (!dom) return '***';
   return (u.slice(0, 2) + '***') + '@' + dom;
+}
+
+/* 17/10/2026: "cardápio" só para quem vende comida e bebida pronta — loja de
+   roupa entrou e viu "Cardápio" com garfo e faca. Mesmo critério do vocab.js
+   do painel e do site: os demais ramos leem "catálogo" (masculino, as frases
+   continuam certas). Só troca texto; nada é gravado. */
+const SUB_COMIDA = new Set(['foodtruck', 'pizzaria', 'sushi', 'lanches', 'pratofeito', 'pipoca', 'padaria',
+  'sorvete', 'suco', 'cafeteria', 'aguacoco', 'barmovel']);
+function ramoEhComida(neg) {
+  const seg = String((neg && neg.segmento) || '').trim();
+  const mac = String((neg && neg.segmentoMacro) || '').trim();
+  if (SUB_COMIDA.has(seg)) return true;
+  return seg !== 'acougue' && (mac === 'alimentacao' || mac === 'bebidas');
+}
+function termoDoRamo(msg, neg) {
+  if (!msg || ramoEhComida(neg)) return msg;
+  const t = (x) => (typeof x === 'string' ? x.replace(/Cardápio/g, 'Catálogo').replace(/cardápio/g, 'catálogo') : x);
+  return Object.assign({}, msg, { subject: t(msg.subject), html: t(msg.html), text: t(msg.text) });
 }
 
 function montarEmail(tipo, nome, dias) {
