@@ -1,4 +1,4 @@
-// api/exclusoes.js | versao 2026-10-20-reserva (apaga tambem reserva_ativa)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-20-agenda (apaga tambem agenda_ocupacao) | antes 2026-10-20-reserva (reserva_ativa)  (repo: moviki-robo)
 // anterior: 2026-10-19-capavideo (apaga tambem o video de capa, capavideo/)
 // anterior: 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)
 // anterior: 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)
@@ -95,6 +95,7 @@ const COLECOES_POR_CAMPO = [
   // 03/10/2026 (P70 etapa 4): Lista VIP — nome, e-mail e WhatsApp de quem pediu aviso da loja
   { colecao: 'vip', campo: 'lojistaUid' },
   { colecao: 'reserva_ativa', campo: 'lojistaUid' },   // 20/10/2026: marca de 1 reserva por WhatsApp (so hash)
+  { colecao: 'agenda_ocupacao', campo: 'uid' },   // 20/10/2026: horarios presos da agenda de servicos
 ];
 
 const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
