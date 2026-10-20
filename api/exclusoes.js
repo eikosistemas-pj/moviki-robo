@@ -1,4 +1,5 @@
-// api/exclusoes.js | versao 2026-10-19-capavideo (apaga tambem o video de capa, capavideo/)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-20-reserva (apaga tambem reserva_ativa)  (repo: moviki-robo)
+// anterior: 2026-10-19-capavideo (apaga tambem o video de capa, capavideo/)
 // anterior: 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)
 // anterior: 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)
 // anterior: 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos) | 06/10/2026 plano 3.4 (aviso de exclusao)
@@ -93,6 +94,7 @@ const COLECOES_POR_CAMPO = [
   { colecao: 'criador_pecas', campo: 'uid' },
   // 03/10/2026 (P70 etapa 4): Lista VIP — nome, e-mail e WhatsApp de quem pediu aviso da loja
   { colecao: 'vip', campo: 'lojistaUid' },
+  { colecao: 'reserva_ativa', campo: 'lojistaUid' },   // 20/10/2026: marca de 1 reserva por WhatsApp (so hash)
 ];
 
 const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
