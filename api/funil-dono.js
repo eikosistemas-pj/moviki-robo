@@ -1,4 +1,4 @@
-// api/funil-dono.js | versao 2026-10-17-seguir (fila Lojistas para seguir: acoes seguir_lista e seguir_feito) | antes 2026-10-09-origem (funil por origem do cadastro) | antes 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
+// api/funil-dono.js | versao 2026-10-20-panfletos (acao panfleto_email: o dono manda o PDF do panfleto com o QR da Eiko por e-mail, lib/panfletoEmail.js) | antes 2026-10-17-seguir (fila Lojistas para seguir: acoes seguir_lista e seguir_feito) | antes 2026-10-09-origem (funil por origem do cadastro) | antes 2026-10-08-confirma1 (lista mostra os lembretes de confirmar o e-mail) | antes 2026-10-07-funil  (repo: moviki-robo)
 // FUNIL DO LOJISTA — P75, fase 1 (peca B5), 07/10/2026.
 //
 // O painel do dono (cartao "Funil do lojista", na Visao geral) mostra, semana
@@ -47,6 +47,7 @@ const { conferirAdmin } = require('../lib/admin');
 const { freioUid } = require('../lib/freio');
 const { origemDoAviso } = require('../lib/origem');
 const seguir = require('../lib/seguirLojista');
+const panfletoEmail = require('../lib/panfletoEmail');
 
 const VERSAO = '2026-10-17-seguir';
 const ORIGIN_OK = 'https://app.moviki.com.br';
@@ -306,6 +307,16 @@ module.exports = async (req, res) => {
       }
       const r = acao === 'seguir_lista' ? await seguir.listar() : await seguir.marcarSeguido(String(body.uid || ''), dec.uid);
       res.status(r.ok ? 200 : (r.erro === 'uid' ? 400 : r.erro === 'nao_encontrado' ? 404 : 500)).json(r);
+      return;
+    }
+    /* 20/10/2026: PDF do panfleto com o QR da Eiko por e-mail (aba Panfletos
+       com QR do painel do dono). So admin, freio proprio de 20 envios por hora. */
+    if (acao === 'panfleto_email') {
+      if (!(await freioUid(admin, db, 'panfemail', dec.uid, 20, 3600000))) {
+        res.status(429).json({ ok: false, erro: 'freio', mensagem: 'Muitos envios seguidos. Tente de novo em alguns minutos.' }); return;
+      }
+      const r = await panfletoEmail.enviar(body, { email: dec.email });
+      res.status(r.ok ? 200 : (r.erro === 'para' || r.erro === 'pdf' ? 400 : 502)).json(r);
       return;
     }
     if (!(await freioUid(admin, db, 'funildono', dec.uid, 30, 3600000))) {
