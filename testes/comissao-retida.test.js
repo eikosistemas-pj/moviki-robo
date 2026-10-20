@@ -106,7 +106,7 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   conf(/retidas/.test(e1.subject || ''), '2. assunto fala das comissoes retidas: ' + e1.subject);
   const html = String(e1.html || '');
   conf(html.indexOf('Contagem regressiva') > html.indexOf('Pagar minha mensalidade'), '2. contagem regressiva no FIM do e-mail');
-  conf(/R\$ 10,49/.test(html) && /29 dias/.test(html), '2. e-mail mostra o retido e os dias que faltam');
+  conf(/R\$ 10,49/.test(html) && /(29|30) dias/.test(html), '2. e-mail mostra o retido e os dias que faltam');   // 29 ou 30 conforme a hora do dia (arredonda para cima)
   conf(!/ganh|renda|garantid/i.test(html + e1.text), '2. sem promessa de ganho');
   conf(d('assinaturas/P').lembretes.atrasoParc.etapa === 1, '2. marca etapa 1');
   r = await cron();
@@ -114,7 +114,7 @@ const cron = async () => T.avisarAtrasoParceiros(await fake.db.collection('assin
   desloc = 10 * DIA;
   r = await cron();
   conf(r.enviados === 1 && /Faltam \d+ dias/.test(emails[1].subject), '2. 10 dias depois: proxima etapa (' + (emails[1] && emails[1].subject) + ')');
-  desloc = 28.6 * DIA;
+  desloc = ini + 29.6 * DIA - realNow();   // 19/10/2026: relativo ao inicio do atraso (antes 28.6 dias fixos falhava depois das 21h36)
   r = await cron();
   conf(r.enviados === 1 && /Último dia/.test(emails[2].subject), '2. ultimo dia: ' + (emails[2] && emails[2].subject));
 
