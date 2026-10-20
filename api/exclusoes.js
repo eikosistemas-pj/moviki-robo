@@ -1,8 +1,9 @@
-// api/exclusoes.js | versao 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-19-capavideo (apaga tambem o video de capa, capavideo/)  (repo: moviki-robo)
+// anterior: 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)
 // anterior: 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)
 // anterior: 2026-10-03-vip (apaga tambem a Lista VIP, recursos e vip_avisos) | 06/10/2026 plano 3.4 (aviso de exclusao)
 // anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
-// 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
+// 2026-10-19: + capavideo/ (video de capa). 2026-09-23: apaga criadores/, capas/, criador_pecas e comprovantes; cancela todas as assinaturas registradas; apelido de parceiro vira lapide (nao reaproveita)
 // Painel do dono -> Exclusoes. Dois modos (campo "action"):
 //   - "listar":  devolve os pedidos de exclusao pendentes (status 'solicitado').
 //   - "excluir": APAGA DE VERDADE a conta do uid informado — cancela a assinatura
@@ -99,7 +100,8 @@ const LOTE = 400;   // Firestore aceita ate 500 operacoes por batch.
 // Apaga os arquivos do usuario no Storage.
 async function apagarArquivos(uid, resumo) {
   // 23/09 (rodada 3): + criadores/ (fotos e videos do criador, com o rosto dele) e capas/ (capa de video).
-  const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/', 'criadores/' + uid + '/', 'capas/' + uid + '/'];
+  // 19/10/2026 (P85): + capavideo/ (video de capa da pagina publica).
+  const alvos = ['logos/' + uid, 'produtos/' + uid + '/', 'documentos/' + uid + '/', 'criadores/' + uid + '/', 'capas/' + uid + '/', 'capavideo/' + uid + '/'];
   for (const prefix of alvos) {
     try {
       await admin.storage().bucket(BUCKET).deleteFiles({ prefix: prefix, force: true });
