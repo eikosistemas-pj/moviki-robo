@@ -6,6 +6,10 @@ class Inc{constructor(n){this.n=n;}}
 class AU{constructor(v){this.v=v;}}
 const FieldValue={ serverTimestamp:()=>S_TS, delete:()=>S_DEL, increment:(n)=>new Inc(n), arrayUnion:(...v)=>new AU(v) };
 const store=new Map(); // path -> data
+// Hora de criacao do documento no servidor (createTime). So existe quando o teste
+// marca com criado(path, ms) — os testes antigos continuam sem createTime.
+const criados=new Map();
+function criado(path,ms){ criados.set(path,ms); }
 let seq=0;
 function rid(){ seq++; return ('X'+seq+'abcdefghijklmnopqrstu').slice(0,20); }
 function isPlain(o){return o&&typeof o==='object'&&!Array.isArray(o)&&!(o instanceof Timestamp)&&!(o instanceof Inc)&&!(o instanceof AU)&&o!==S_TS&&o!==S_DEL;}
@@ -19,7 +23,7 @@ function applySet(path,data,opts){ const cur=store.get(path);
   if(opts&&opts.merge){ store.set(path,deepMerge(cur,data)); return; }
   store.set(path,resolve(undefined,data)); }
 function applyUpdate(path,data){ const cur=store.get(path); if(!cur){const e=new Error('NOT_FOUND '+path);e.code=5;throw e;} const o=clone(cur); for(const k in data)setPath(o,k,data[k]); store.set(path,o); }
-class Snap{ constructor(ref){this.ref=ref;this.id=ref.id;const d=store.get(ref.path);this.exists=!!d;this._d=d?clone(d):undefined;} data(){return this._d;} get(f){return this._d?getPath(this._d,f):undefined;} }
+class Snap{ constructor(ref){this.ref=ref;this.id=ref.id;const d=store.get(ref.path);this.exists=!!d;this._d=d?clone(d):undefined;if(d&&criados.has(ref.path))this.createTime=new Timestamp(criados.get(ref.path));} data(){return this._d;} get(f){return this._d?getPath(this._d,f):undefined;} }
 class DocRef{ constructor(path){this.path=path;this.id=path.split('/').pop();}
   collection(n){return new ColRef(this.path+'/'+n);}
   async get(){return new Snap(this);} async set(d,o){applySet(this.path,d,o);} async update(d){applyUpdate(this.path,d);} async delete(){store.delete(this.path);}
@@ -38,4 +42,4 @@ const db={ collection:(n)=>new ColRef(n), doc:(p)=>new DocRef(p), batch(){ const
         set(r,d,o){escreveu=true;writes.push(()=>applySet(r.path,d,o));}, update(r,d){escreveu=true;writes.push(()=>applyUpdate(r.path,d));}, delete(r){escreveu=true;writes.push(()=>store.delete(r.path));} };
       const out=await fn(tx); const snap=new Map(store); try{ writes.forEach(w=>w()); }catch(e){ store.clear(); for(const [k,v] of snap)store.set(k,v); throw e; } return out; } } };
 const admin={ firestore:Object.assign(()=>db,{FieldValue,Timestamp}), auth:()=>({getUser:async()=>{throw new Error('sem auth');},verifyIdToken:async(t)=>({uid:t,firebase:{sign_in_provider:'google.com'}})}), storage:()=>({bucket:()=>({})}) };
-module.exports={admin,db,store,Timestamp};
+module.exports={admin,db,store,Timestamp,criado,criados};
