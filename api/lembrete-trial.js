@@ -1,4 +1,4 @@
-// versao 2026-10-17-seguir (varredura da fila Lojistas para seguir: loja completa + lembrete diario de pendentes no Telegram, lib/seguirLojista.js). Antes: 2026-10-17-subirplano (e-mails de fim de teste e o convite de volta ganham o link da aula de 1 minuto 'O que muda em cada plano', que abre no painel por ?aula=mod-subir-plano). Antes: 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
+// versao 2026-10-20-parceirolojista (parceiro que virou lojista: o fim do teste gratis do negocio abre a carencia de 30 dias — e-mail proprio com a contagem regressiva, motivo 'fim_teste', e o aviso de comissao perdida com o texto do teste). Antes: 2026-10-17-seguir (varredura da fila Lojistas para seguir: loja completa + lembrete diario de pendentes no Telegram, lib/seguirLojista.js). Antes: 2026-10-17-subirplano (e-mails de fim de teste e o convite de volta ganham o link da aula de 1 minuto 'O que muda em cada plano', que abre no painel por ?aula=mod-subir-plano). Antes: 2026-10-17-carencia (lojista-parceiro em atraso: e-mail com contagem regressiva ate as comissoes serem perdidas, nos marcos de 30/21/14/7/3/1 dias, e aviso unico quando o prazo acaba) | antes 2026-10-14-provisorio (teste provisorio: sem avisos de teste para quem nao confirmou, lembrete de confirmacao diz que o teste ja comecou, 3o lembrete antes dos 7 dias) | antes 2026-10-08-confirma1 (lembrete de confirmar o e-mail, novidade do ensaio e convite de volta) | antes 2026-10-07-ativacao1 (P75 fase 0: e-mails da primeira live, descadastro das dicas, Premium como destino; inclui a 2026-10-05-global: pula Paddle e negocio de fora do Brasil; base 2026-10-03-segredo)
 // api/lembrete-trial.js  (repo: moviki-robo)
 // ROBÔ DE LEMBRETES — roda 1x por dia (agendado no vercel.json).
 // Avisa por e-mail quem está pra perder acesso:
@@ -475,21 +475,32 @@ async function avisarAtrasoParceiros(snap, enviarDeVerdade, API_KEY, agora) {
     const p = await dadosDoParceiro(uid);
     if (!p) { r.detalhes.push({ uid, tipo: 'perdida', status: 'sem_parceiro_ou_email' }); continue; }
     if (!enviarDeVerdade) { r.detalhes.push({ uid, tipo: 'perdida', valor: info.valor, email: mascara(p.email), status: 'simulado' }); continue; }
-    if (await enviarResend(API_KEY, p.email, montarComissaoPerdida(p.nome, info.qtd, info.valor, info.prazoMs), '')) {
+    if (await enviarResend(API_KEY, p.email, montarComissaoPerdida(p.nome, info.qtd, info.valor, info.prazoMs, info.motivo), '')) {
       r.enviados++; r.perdidasAvisadas++; r.detalhes.push({ uid, tipo: 'perdida', status: 'enviado' });
     } else r.detalhes.push({ uid, tipo: 'perdida', status: 'falha_envio' });
   }
 
   // (b) dentro dos 30 dias: contagem regressiva nos marcos.
+  // 20/10/2026: alem do atraso da mensalidade, o FIM DO TESTE GRATIS de quem
+  // era parceiro antes de abrir o negocio (lib/comissaoRetida.js, opcao B).
+  // So le parceiro e negocio de teste que acabou nos ultimos 30 dias.
   for (const docu of snap.docs) {
     const d = docu.data() || {};
-    if (!d.atrasoDesde || d.gateway === 'paddle') continue;
-    const sit = retida.avaliarSituacao(true, d, agora);
-    if (!sit.carencia) continue;
+    if (d.gateway === 'paddle') continue;
+    let sit = null;
+    if (d.atrasoDesde) {
+      sit = retida.avaliarSituacao(true, d, agora);
+    } else if (d.periodo === 'trial') {
+      const fim = msDe(d.vence_em);
+      if (!fim || fim > agora || fim < agora - retida.PRAZO_DIAS * DIA_MS) continue;
+      sit = await retida.situacaoParceiro(db, docu.id, agora);
+      if (sit.motivo !== 'fim_teste') continue;
+    } else continue;
+    if (!sit || !sit.carencia) continue;
     const etapa = retida.etapaAtraso(sit.prazoMs, agora);
     if (!etapa) continue;
     const marca = (d.lembretes || {}).atrasoParc || {};
-    const atrasoId = String(sit.inicioMs);
+    const atrasoId = (sit.motivo === 'fim_teste' ? 'teste' : '') + String(sit.inicioMs);
     if (marca.id === atrasoId && Number(marca.etapa || 0) >= etapa) continue;
     const uid = docu.id;
     const p = await dadosDoParceiro(uid);
@@ -497,7 +508,7 @@ async function avisarAtrasoParceiros(snap, enviarDeVerdade, API_KEY, agora) {
     const dias = retida.diasRestantes(sit.prazoMs, agora);
     const ret = await retida.totalRetido(db, uid);
     if (!enviarDeVerdade) { r.detalhes.push({ uid, tipo: 'atraso', dias, retido: ret.valor, email: mascara(p.email), status: 'simulado' }); continue; }
-    const msg = montarAtrasoParceiro(p.nome, sit.inicioMs, sit.prazoMs, dias, ret);
+    const msg = montarAtrasoParceiro(p.nome, sit.inicioMs, sit.prazoMs, dias, ret, sit.motivo);
     if (!(await enviarResend(API_KEY, p.email, msg, ''))) { r.detalhes.push({ uid, tipo: 'atraso', status: 'falha_envio' }); continue; }
     try { await docu.ref.update({ 'lembretes.atrasoParc': { id: atrasoId, etapa, em: admin.firestore.FieldValue.serverTimestamp() } }); } catch (e) { console.error('marca atrasoParc erro:', uid, e); }
     r.enviados++; r.detalhes.push({ uid, tipo: 'atraso', dias, status: 'enviado' });
@@ -550,22 +561,33 @@ function botao(texto, url) {
 
 /* E-mail do atraso. A contagem regressiva fica NO FIM, como pediu o Paulo:
    e a ultima coisa que ele le antes de fechar. Nenhum texto promete ganho. */
-function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
+function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret, motivo) {
   const d = Math.max(1, dias);
   const prazo = dataBR(prazoMs);
   const desde = dataBR(desdeMs);
   const ultimo = d === 1;
-  const subject = ultimo ? 'Último dia para não perder suas comissões de parceiro'
-    : (d >= 22 ? 'Mensalidade em atraso: suas comissões de parceiro estão retidas'
+  /* 20/10/2026: motivo 'fim_teste' = parceiro que abriu um negocio e o teste
+     gratis dele acabou sem plano pago. Mesma contagem, outro texto. */
+  const teste = motivo === 'fim_teste';
+  const subject = ultimo ? (teste ? 'Último dia para não perder suas comissões de parceiro' : 'Último dia para não perder suas comissões de parceiro')
+    : (d >= 22 ? (teste ? 'Seu teste grátis terminou: suas comissões de parceiro estão retidas' : 'Mensalidade em atraso: suas comissões de parceiro estão retidas')
       : 'Faltam ' + d + ' dias para você perder suas comissões de parceiro');
-  const titulo = 'Sua mensalidade do Moviki está em atraso';
+  const titulo = teste ? 'O teste grátis do seu negócio terminou' : 'Sua mensalidade do Moviki está em atraso';
   const temRetido = ret && ret.qtd > 0;
   const linhaRetido = temRetido
     ? ('Retido hoje: ' + reais(ret.valor) + ' em ' + ret.qtd + (ret.qtd === 1 ? ' comissão' : ' comissões') + '.')
-    : 'Nenhuma comissão retida até agora. As que surgirem durante o atraso também ficam retidas.';
-  const p1 = 'A mensalidade do seu plano venceu em ' + desde + ' e ainda não consta como paga. Como você também é parceiro do Moviki, as comissões das suas indicações ficam retidas enquanto o atraso durar.';
-  const p2 = 'Pagando até ' + prazo + ', tudo o que ficou retido é liberado sozinho no seu painel de parceiro. Depois dessa data, as comissões geradas durante o atraso são perdidas e não voltam.';
-  const p3 = 'Já pagou? Pode desconsiderar: a liberação acontece assim que o pagamento é confirmado.';
+    : (teste ? 'Nenhuma comissão retida até agora. As que surgirem até você escolher um plano também ficam retidas.'
+      : 'Nenhuma comissão retida até agora. As que surgirem durante o atraso também ficam retidas.');
+  const p1 = teste
+    ? ('O teste grátis do seu negócio no Moviki terminou em ' + desde + '. Como você também é parceiro do Moviki, as comissões das suas indicações ficam retidas até o seu negócio estar num plano pago. No plano Básico, gratuito, o negócio continua no ar, mas a comissão de parceiro não é paga.')
+    : ('A mensalidade do seu plano venceu em ' + desde + ' e ainda não consta como paga. Como você também é parceiro do Moviki, as comissões das suas indicações ficam retidas enquanto o atraso durar.');
+  const p2 = teste
+    ? ('Assinando um plano até ' + prazo + ', tudo o que ficou retido é liberado sozinho no seu painel de parceiro. Depois dessa data, as comissões retidas são perdidas e não voltam.')
+    : ('Pagando até ' + prazo + ', tudo o que ficou retido é liberado sozinho no seu painel de parceiro. Depois dessa data, as comissões geradas durante o atraso são perdidas e não voltam.');
+  const p3 = teste
+    ? 'Já assinou? Pode desconsiderar: a liberação acontece assim que o pagamento é confirmado.'
+    : 'Já pagou? Pode desconsiderar: a liberação acontece assim que o pagamento é confirmado.';
+  const rotuloBotao = teste ? 'Escolher meu plano →' : 'Pagar minha mensalidade →';
 
   const urg = d <= 7;
   const cor = urg ? '#dc2626' : '#d97706';
@@ -577,7 +599,7 @@ function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
             <tr><td style="padding:20px 18px 6px;text-align:center">
               <p style="margin:0 0 4px;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:${cor};font-weight:bold">Contagem regressiva</p>
               <p style="margin:0;font-size:46px;line-height:1.1;font-weight:bold;color:${cor}">${ultimo ? 'Último dia' : (d + ' dias')}</p>
-              <p style="margin:6px 0 14px;font-size:14px;color:#33465c">${ultimo ? 'para pagar sem perder as suas comissões de parceiro' : 'para as suas comissões de parceiro serem perdidas'}</p>
+              <p style="margin:6px 0 14px;font-size:14px;color:#33465c">${ultimo ? (teste ? 'para assinar sem perder as suas comissões de parceiro' : 'para pagar sem perder as suas comissões de parceiro') : 'para as suas comissões de parceiro serem perdidas'}</p>
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#e5e7eb;border-radius:6px;height:10px">
                 <tr><td width="${pct}%" style="background:${cor};border-radius:6px;height:10px;font-size:0;line-height:0">&nbsp;</td><td style="font-size:0;line-height:0">&nbsp;</td></tr>
               </table>
@@ -591,7 +613,7 @@ function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
             <tr><td style="padding:14px 18px;font-size:14px;line-height:1.6;color:#33465c"><b>${esc(linhaRetido)}</b></td></tr>
           </table>
           <p style="margin:0 0 20px">${esc(p2)}</p>
-          ${botao('Pagar minha mensalidade →', PAINEL_URL)}
+          ${botao(rotuloBotao, PAINEL_URL)}
           <p style="margin:0 0 18px;font-size:13px;color:#64748b">${esc(p3)}</p>`;
   const topo = `<tr><td style="padding:32px 34px 8px">
           <h1 style="margin:0 0 8px;font-size:22px;color:#0c2138">Olá, ${esc(nome)}!</h1>
@@ -600,7 +622,7 @@ function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
   const html = moldura(topo, corpo, contagem);
   const text = [
     'Olá, ' + nome + '!', '', titulo + '.', '', p1, '', linhaRetido, '', p2, '',
-    'Pagar minha mensalidade: ' + PAINEL_URL, p3, '',
+    (teste ? 'Escolher meu plano: ' : 'Pagar minha mensalidade: ') + PAINEL_URL, p3, '',
     'Dúvidas? WhatsApp: ' + WPP_TEXTO + ' (' + WPP_LINK + ')', '',
     '----------------------------------------',
     'CONTAGEM REGRESSIVA: ' + (ultimo ? 'último dia' : ('faltam ' + d + ' dias')) + ' para as suas comissões de parceiro serem perdidas.',
@@ -610,12 +632,15 @@ function montarAtrasoParceiro(nome, desdeMs, prazoMs, dias, ret) {
   return { subject, html, text };
 }
 
-function montarComissaoPerdida(nome, qtd, valor, prazoMs) {
+function montarComissaoPerdida(nome, qtd, valor, prazoMs, motivo) {
+  const teste = motivo === 'fim_teste';
   const subject = 'O prazo acabou: comissões de parceiro perdidas';
   const titulo = 'O prazo de 30 dias terminou';
-  const p1 = 'O prazo para pagar a mensalidade em atraso terminou em ' + dataBR(prazoMs) + '. ' +
+  const p1 = (teste ? 'O prazo para escolher um plano depois do fim do teste grátis terminou em ' : 'O prazo para pagar a mensalidade em atraso terminou em ') + dataBR(prazoMs) + '. ' +
     qtd + (qtd === 1 ? ' comissão retida, de ' : ' comissões retidas, somando ') + reais(valor) + ', ' + (qtd === 1 ? 'foi perdida' : 'foram perdidas') + '.';
-  const p2 = 'Quando a sua mensalidade voltar a ficar em dia, as comissões das suas indicações voltam a entrar normalmente no seu painel de parceiro.';
+  const p2 = teste
+    ? 'Quando o seu negócio estiver num plano pago, as comissões das suas indicações voltam a entrar normalmente no seu painel de parceiro.'
+    : 'Quando a sua mensalidade voltar a ficar em dia, as comissões das suas indicações voltam a entrar normalmente no seu painel de parceiro.';
   const topo = `<tr><td style="padding:32px 34px 8px">
           <h1 style="margin:0 0 8px;font-size:22px;color:#0c2138">Olá, ${esc(nome)}!</h1>
           <p style="margin:0;font-size:17px;color:#dc2626;font-weight:bold">${esc(titulo)}</p>
