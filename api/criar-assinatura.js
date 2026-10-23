@@ -215,6 +215,25 @@ module.exports = async function criarAssinatura(req, res) {
     if (docNum.length !== 11 && docNum.length !== 14) {
       return res.status(400).json({ erro: 'CPF ou CNPJ invalido.' });
     }
+    /* NOTA FISCAL — 22/10/2026. A NFS-e sai no CPF/CNPJ e no endereco do cliente
+       no Asaas. Antes: (a) qualquer sequencia de 11/14 digitos passava (a nota
+       sairia em nome de terceiro); (b) o cliente nascia sem endereco e o Asaas
+       recusa emitir nota sem CEP; (c) cliente ja existente nunca era atualizado.
+       Agora: digito verificador conferido, CEP + numero gravados no cliente e
+       cliente existente atualizado com o que a pessoa digitou agora. Painel
+       antigo sem CEP continua assinando (a nota falha e avisa no Telegram). */
+    const _dv = require('../lib/pix')._t;
+    if ((docNum.length === 11 && !_dv.cpfValido(docNum)) || (docNum.length === 14 && !_dv.cnpjValido(docNum))) {
+      return res.status(400).json({ erro: 'Confira o CPF ou CNPJ: os números não batem.', motivo: 'doc_invalido' });
+    }
+    const cepNum = String((req.body && req.body.cep) || '').replace(/\D/g, '');
+    const numEnd = String((req.body && req.body.numero) || '').trim().slice(0, 10);
+    if (cepNum && cepNum.length !== 8) return res.status(400).json({ erro: 'CEP inválido.', motivo: 'cep_invalido' });
+    const endCli = cepNum ? { postalCode: cepNum, addressNumber: numEnd || 'S/N' } : {};
+    /* Nome que sai na nota (nome completo do CPF ou razao social do CNPJ).
+       Antes ia o nome do NEGOCIO (fantasia) junto com o CPF da pessoa. */
+    const nomeNota = String((req.body && req.body.nomeNota) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (nomeNota && nomeNota.length < 5) return res.status(400).json({ erro: 'Escreva o nome completo ou a razão social.', motivo: 'nome_nota' });
     /* TRAVA "JA ATIVO" + TESTE GRATIS — revisao 23/09/2026 (2026-09-23-assinatura)
 
        O DEFEITO: o teste gratis grava assinaturas/{uid} com ativo:true ate o
@@ -292,12 +311,18 @@ module.exports = async function criarAssinatura(req, res) {
         else throw e;
       }
     }
+    if (asaasCustomerId) {
+      try {
+        await asaas('/customers/' + asaasCustomerId, 'PUT', Object.assign({ cpfCnpj: docNum }, nomeNota ? { name: nomeNota } : (nome ? { name: String(nome).slice(0, 120) } : {}), endCli));
+      } catch (e) { console.error('[criar-assinatura] atualizar cliente', e && e.message); }
+    }
 
     if (!asaasCustomerId) {
       const cli = await asaas('/customers', 'POST', {
-        name: nomeSeguro || email || ('Lojista ' + uid.slice(0, 6)),
+        name: nomeNota || nomeSeguro || email || ('Lojista ' + uid.slice(0, 6)),
         cpfCnpj: docNum,
         email,
+        ...endCli,
       });
       asaasCustomerId = cli.id;
       await fatRef.set({ asaasCustomerId, atualizadoEm: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });

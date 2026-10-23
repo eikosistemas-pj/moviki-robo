@@ -1,4 +1,4 @@
-// api/exclusoes.js | versao 2026-10-20-agenda (apaga tambem agenda_ocupacao) | antes 2026-10-20-reserva (reserva_ativa)  (repo: moviki-robo)
+// api/exclusoes.js | versao 2026-10-22-fiscal (dados para receber do parceiro: apaga, ou guarda 5 anos se ja recebeu) | antes 2026-10-20-agenda (apaga tambem agenda_ocupacao) | antes 2026-10-20-reserva (reserva_ativa)  (repo: moviki-robo)
 // anterior: 2026-10-19-capavideo (apaga tambem o video de capa, capavideo/)
 // anterior: 2026-10-17-seguir (apaga tambem lojista_instagram e seguir_lojista)
 // anterior: 2026-10-07-ensaio (apaga tambem live_ensaios e marcos_lojista)
@@ -414,6 +414,20 @@ module.exports = async (req, res) => {
               .then(() => { resumo.espelhoParceiro = true; })
               .catch(() => {});
           }
+          /* 22/10/2026: dados para receber (CPF/CNPJ, nome, nascimento). Quem
+             ja recebeu comissao: guarda 5 anos (obrigacao fiscal da Eiko —
+             recibo, INSS/IR, eSocial; LGPD art. 16, I), marcado como conta
+             excluida. Quem nunca recebeu: apaga. */
+          try {
+            const pagos = await db.collection('saques').where('parceiroUid', '==', uid).where('status', '==', 'pago').get();
+            const fRef = db.collection('parceiros_fiscal').doc(uid);
+            if (pagos.empty) { await fRef.delete().catch(() => {}); resumo.fiscal = 'apagado'; }
+            else {
+              const ate = new Date(); ate.setUTCFullYear(ate.getUTCFullYear() + 5);
+              await fRef.set({ contaExcluida: true, excluidoEm: admin.firestore.FieldValue.serverTimestamp(), guardarAte: admin.firestore.Timestamp.fromDate(ate) }, { merge: true }).catch(() => {});
+              resumo.fiscal = 'guardado_5_anos';
+            }
+          } catch (_) {}
           resumo.comissoes = await apagarDaConsulta(db.collection('comissoes').where('parceiroUid', '==', uid));
           resumo.saques    = await apagarDaConsulta(db.collection('saques').where('parceiroUid', '==', uid));
           await parcRef.delete().catch(() => {});
