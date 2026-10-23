@@ -1,4 +1,4 @@
-// api/pagar-saque.js | versao 2026-10-06-alarme (aviso de saque no Telegram) | antes 2026-10-06-revogada (alerta de Pix trocado ha pouco)  (repo: moviki-robo)
+// api/pagar-saque.js | versao 2026-10-22-fiscal (so paga parceiro com CPF/CNPJ em Meus dados; confere o dono da chave Pix com o documento) | antes 2026-10-06-alarme (aviso de saque no Telegram) | antes 2026-10-06-revogada (alerta de Pix trocado ha pouco)  (repo: moviki-robo)
 // anterior: 2026-10-03-admingoogle (acao de dono so com sessao do Google)
 // anterior: 2026-10-01-saque3 (B14: um saque por parceiro de cada vez; Pix em duvida segura os outros saques)
 // anterior: 2026-09-23-saque2 (manual so com valor conferido; erro de rede nao diz 'nenhum valor saiu')
@@ -29,6 +29,8 @@
 const { admin, db } = require('../lib/firebase');
 const { conferirAdmin } = require('../lib/admin');
 const { asaas } = require('../lib/asaas');
+const FISCAL = require('../lib/fiscalParceiro');
+const RET = require('../lib/retencaoPF');
 
 const ORIGIN_OK = 'https://app.moviki.com.br';
 
@@ -359,6 +361,22 @@ module.exports = async (req, res) => {
       }
     }
 
+    /* 22/10/2026 — DADOS PARA RECEBER. Comissao so sai para parceiro que
+       informou CPF ou CNPJ, nome/razao social e (PF) data de nascimento 18+ em
+       Meus dados (parceiros_fiscal/{uid}, api/parceiro-fiscal). Sem isso a Eiko
+       nao tem como emitir recibo, reter INSS/IR nem receber a nota do parceiro.
+       A retomada de uma baixa que ja pagou nao passa por aqui (nada sai). */
+    let fiscal = null;
+    if (!retomarQuitacao) {
+      const fSnap = await db.collection('parceiros_fiscal').doc(parceiroUid).get();
+      fiscal = fSnap.exists ? (fSnap.data() || null) : null;
+      if (!fiscal || !fiscal.documento) {
+        res.status(409).json({ ok: false, erro: 'sem_dados_fiscais',
+          mensagem: 'Este parceiro ainda não preencheu os Dados para receber (CPF ou CNPJ) em Meus dados. Peça para completar antes de pagar.' });
+        return;
+      }
+    }
+
     // 3) Comissões que esse pagamento quita + valor real.
     const cs = await db.collection('comissoes').where('parceiroUid', '==', parceiroUid).get();
     const sel = selecionarComissoes(cs.docs, corte);
@@ -397,6 +415,33 @@ module.exports = async (req, res) => {
       return;
     }
 
+    /* 22/10/2026 — RETENCAO E REGRAS POR TIPO (lib/retencaoPF.js).
+       PF: o Pix e o LIQUIDO (bruto - INSS 11% - IRRF), uma vez por mes, a
+       partir do dia 10. PJ: valor cheio, so com a chave da NFS-e do parceiro
+       (no pedido de saque ou informada pelo dono no pagamento avulso). */
+    const ret = RET.calcular(fiscal, valor);
+    let nfseChave = String(body.nfseChave || '').replace(/\D/g, '');
+    if (!avulso && !nfseChave) { try { nfseChave = String(((await saqueRef.get()).data() || {}).nfseChave || ''); } catch (_) {} }
+    let regra = { ok: true };
+    if (fiscal && fiscal.tipo === 'pf') {
+      const pagosSnap = await db.collection('saques').where('parceiroUid', '==', parceiroUid).where('status', '==', 'pago').get();
+      const pagos = pagosSnap.docs.filter((d) => !saqueRef || d.id !== saqueRef.id).map((d) => ({ em: ms((d.data() || {}).pagoEm) }));
+      regra = RET.regraMensal(fiscal, pagos);
+    } else if (fiscal && fiscal.tipo === 'pj' && !RET.chaveNfseValida(nfseChave)) {
+      regra = { ok: false, erro: 'pj_sem_nota', mensagem: 'Parceiro com CNPJ: falta a nota fiscal (NFS-e) dele para este pagamento. Ele informa a chave de acesso no pedido de saque, ou você informa aqui.' };
+    }
+    const camposFiscais = {
+      fiscalTipo: fiscal ? fiscal.tipo : null,
+      fiscalDocFim: fiscal ? String(fiscal.documento).slice(-4) : null,
+      valorBruto: ret.bruto, inssRetido: ret.inss, irrfRetido: ret.irrf,
+      competencia: RET.competencia(),
+      nfseChave: (fiscal && fiscal.tipo === 'pj') ? nfseChave : null,
+    };
+    if (etapa !== 'conferir' && !regra.ok) {
+      res.status(409).json({ ok: false, erro: regra.erro, mensagem: regra.mensagem, retencao: ret });
+      return;
+    }
+
     // ---------- etapa MANUAL: o dono pagou pelo banco, só registra ----------
     if (etapa === 'manual') {
       /* 23/09/2026 (rodada 3) — O VALOR DO PEDIDO NAO E PROVA DE NADA.
@@ -412,11 +457,12 @@ module.exports = async (req, res) => {
           mensagem: 'Este parceiro não tem comissão liberada para quitar agora. Nada foi registrado.' }); return;
       }
       const conferido = Math.round((Number(body.valorConferido) || 0) * 100) / 100;
-      if (Math.abs(conferido - valor) > 0.009) {
-        res.status(409).json({ ok: false, erro: 'confirme_valor', valor: valor, valorPedido: valorPedido,
+      if (Math.abs(conferido - ret.liquido) > 0.009) {
+        res.status(409).json({ ok: false, erro: 'confirme_valor', valor: ret.liquido, valorBruto: valor, retencao: ret, valorPedido: valorPedido,
           mensagem: 'O valor liberado de verdade é ' + brlTxt(valor) +
+                    (ret.tipo === 'pf' && ret.liquido !== valor ? ' — com INSS ' + brlTxt(ret.inss) + (ret.irrf ? ' e IR ' + brlTxt(ret.irrf) : '') + ' retidos, o Pix é ' + brlTxt(ret.liquido) : '') +
                     (valorPedido && Math.abs(valorPedido - valor) > 0.009 ? ' (o parceiro pediu ' + brlTxt(valorPedido) + ' — pague só o liberado)' : '') +
-                    '. Confirme que você pagou exatamente ' + brlTxt(valor) + '.' });
+                    '. Confirme que você pagou exatamente ' + brlTxt(ret.liquido) + '.' });
         return;
       }
       if (avulso) {
@@ -429,12 +475,13 @@ module.exports = async (req, res) => {
       const dadosSaque = {
         status: 'pago',
         pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-        valorPago: valor,
+        valorPago: ret.liquido,
         comissoesQuitadas: sel.escolhidas.length,
         comprovante: comprovante || null,
         formaPagamento: 'manual',
         pagoPor: decoded.uid,
       };
+      Object.assign(dadosSaque, camposFiscais);
       /* B13 — o registro do saque fecha PRIMEIRO, em uma escrita so; as
          comissoes vao depois, em lotes de 400. Batch unico estourava acima de
          500 operacoes e deixava o saque sem registro nenhum. */
@@ -461,7 +508,7 @@ module.exports = async (req, res) => {
                     'nenhum valor novo sai.' });
         return;
       }
-      res.status(200).json({ ok: true, valorPago: valor, qtd: qtdM, forma: 'manual' });
+      res.status(200).json({ ok: true, valorPago: ret.liquido, valorBruto: valor, retencao: ret, qtd: qtdM, forma: 'manual' });
       return;
     }
 
@@ -509,10 +556,23 @@ module.exports = async (req, res) => {
       }
     }
 
+    /* 22/10/2026: o dono da chave Pix e o CPF/CNPJ cadastrado? O Asaas devolve
+       o documento mascarado; confere os digitos visiveis. Nao bloqueia (Pix de
+       PJ na chave do socio existe), mas avisa na conferencia e no Telegram. */
+    const docBate = fiscal ? FISCAL.docConfere(fiscal.documento, dados.documento) : null;
+    if (docBate === false) {
+      alertaPixSaque = (alertaPixSaque ? alertaPixSaque + ' ' : '') +
+        'Atencao: o dono desta chave Pix (' + (dados.documento || '?') + ') NAO e o ' + (fiscal.tipo === 'pj' ? 'CNPJ' : 'CPF') +
+        ' cadastrado pelo parceiro (' + FISCAL.mascarar(fiscal.documento) + '). Confirme antes de pagar.';
+    }
+
     // ---------- etapa CONFERIR: só devolve para o dono conferir ----------
     if (etapa === 'conferir') {
       res.status(200).json({
         ok: true, etapa: 'conferir', valor: valor, qtd: sel.escolhidas.length,
+        fiscalTipo: fiscal ? fiscal.tipo : null, fiscalDoc: fiscal ? FISCAL.mascarar(fiscal.documento) : null,
+        fiscalNome: fiscal ? (fiscal.nome || '') : null, docConfere: docBate,
+        retencao: ret, regraOk: regra.ok, regraMensagem: regra.ok ? null : regra.mensagem, nfseChave: nfseChave || null,
         chave: dados.chave, tipoChave: dados.tipo, alertaPix: alertaPixSaque,
         titular: dados.titular, documento: dados.documento, banco: dados.banco,
         parceiro: parceiro.nome || '', avulso: avulso,
@@ -612,14 +672,15 @@ module.exports = async (req, res) => {
     let transf;
     try {
       transf = await asaas('/transfers', 'POST', {
-        value: valor,
+        value: ret.liquido,
         operationType: 'PIX',
         pixAddressKey: dados.chave,
         pixAddressKeyType: dados.tipo,
         description: 'Moviki - comissao de parceiro',
         externalReference: saqueRef.id,
       });
-      await avisoSaque((valor > 300 ? '🚨 SAQUE ALTO' : '💸 Saque') + ' de parceiro: R$ ' + valor.toFixed(2).replace('.', ',') +
+      await avisoSaque((valor > 300 ? '🚨 SAQUE ALTO' : '💸 Saque') + ' de parceiro: R$ ' + ret.liquido.toFixed(2).replace('.', ',') +
+        (ret.tipo === 'pf' && ret.liquido !== valor ? ' (bruto R$ ' + valor.toFixed(2).replace('.', ',') + ', INSS R$ ' + ret.inss.toFixed(2).replace('.', ',') + (ret.irrf ? ', IR R$ ' + ret.irrf.toFixed(2).replace('.', ',') : '') + ' retidos)' : '') +
         '\nParceiro: ' + (parceiro.slug || parceiroUid) + '\nChave: ' + String(dados.chave || '').slice(0, 6) + '…' +
         (alertaPixSaque ? '\n⚠ ' + alertaPixSaque : '') + '\nSe nao foi voce, e invasao da conta do dono.');
     } catch (err) {
@@ -713,7 +774,10 @@ module.exports = async (req, res) => {
     await saqueRef.update({
       status: 'pago',
       pagoEm: admin.firestore.FieldValue.serverTimestamp(),
-      valorPago: valor,
+      valorPago: ret.liquido,
+      valorBruto: camposFiscais.valorBruto, inssRetido: camposFiscais.inssRetido, irrfRetido: camposFiscais.irrfRetido,
+      fiscalTipo: camposFiscais.fiscalTipo, fiscalDocFim: camposFiscais.fiscalDocFim, competencia: camposFiscais.competencia,
+      nfseChave: camposFiscais.nfseChave,
       comissoesQuitadas: 0,
       quitacaoPendente: sel.escolhidas.length > 0,
       comprovante: comprovante || ('Pix Asaas ' + ((transf && transf.id) || '')),
@@ -736,14 +800,14 @@ module.exports = async (req, res) => {
       await saqueRef.update({ comissoesQuitadas: qtdQ }).catch(() => {});
       res.status(500).json({ ok: false, erro: 'quitacao', pagou: true,
         transferenciaId: (transf && transf.id) || null,
-        mensagem: 'O Pix de ' + valor + ' SAIU. A baixa parou em ' + qtdQ + ' de ' +
+        mensagem: 'O Pix de ' + ret.liquido + ' SAIU. A baixa parou em ' + qtdQ + ' de ' +
                   sel.escolhidas.length + ' comissao(oes). Clique em pagar de novo: ' +
                   'o robo retoma a baixa e nenhum valor novo sai.' });
       return;
     }
 
     res.status(200).json({
-      ok: true, forma: 'pix_automatico', valorPago: valor, qtd: qtdQ,
+      ok: true, forma: 'pix_automatico', valorPago: ret.liquido, valorBruto: valor, retencao: ret, qtd: qtdQ,
       transferenciaId: (transf && transf.id) || null, transferenciaStatus: st,
       titular: dados.titular,
     });

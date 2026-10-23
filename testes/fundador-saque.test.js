@@ -252,11 +252,12 @@ function roteiroCriar(extra) {
   store.clear(); chamadas = [];
   store.set('admins/ADM', { ok: true });
   store.set('parceiros/PX', { status: 'aprovado', pix: 'parceiro@teste.com', nome: 'Parceiro X' });
+  store.set('parceiros_fiscal/PX', { tipo: 'pj', documento: '11222333000181', nome: 'Parceiro X Teste ME' });  // 22/10: sem dados para receber o robo nao paga; PJ = sem retencao (PF tem teste proprio)
   const antes = Timestamp.fromMillis(Date.now() - 20 * DIA);
   store.set('comissoes/c1', { parceiroUid: 'PX', valor: 30, pago: false, estornada: false, criadoEm: antes, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
   store.set('comissoes/c2', { parceiroUid: 'PX', valor: 20, pago: false, estornada: false, criadoEm: antes, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
-  store.set('saques/SA', { parceiroUid: 'PX', status: 'solicitado', valorSolicitado: 50, pedidoEm: Timestamp.now() });
-  store.set('saques/SB', { parceiroUid: 'PX', status: 'solicitado', valorSolicitado: 50, pedidoEm: Timestamp.now() });
+  store.set('saques/SA', { parceiroUid: 'PX', nfseChave: '11111111111111111111111111111111111111111111111111', status: 'solicitado', valorSolicitado: 50, pedidoEm: Timestamp.now() });
+  store.set('saques/SB', { parceiroUid: 'PX', nfseChave: '11111111111111111111111111111111111111111111111111', status: 'solicitado', valorSolicitado: 50, pedidoEm: Timestamp.now() });
   let transfers = 0;
   let modo = 'incerto';
   roteiro = (p, m, c) => {
@@ -288,7 +289,7 @@ function roteiroCriar(extra) {
   // 13. baixa pendente de outro saque segura o pagamento seguinte
   store.set('comissoes/c3', { parceiroUid: 'PX', valor: 10, pago: false, estornada: false, criadoEm: antes, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
   store.set('saques/SC', { parceiroUid: 'PX', status: 'pago', quitacaoPendente: true, valorPago: 10, pedidoEm: Timestamp.now() });
-  store.set('saques/SD', { parceiroUid: 'PX', status: 'solicitado', valorSolicitado: 10, pedidoEm: Timestamp.now() });
+  store.set('saques/SD', { parceiroUid: 'PX', nfseChave: '11111111111111111111111111111111111111111111111111', status: 'solicitado', valorSolicitado: 10, pedidoEm: Timestamp.now() });
   r = await chamarSaque({ saqueId: 'SD', etapa: 'pagar' });
   conf(r.code === 409 && r.body.erro === 'outro_saque_baixa_pendente' && transfers === 2, '13. baixa pendente do saque C barra o D');
   conf(!d('saque_trava/PX'), '13. recusa nao deixa trava presa');
@@ -300,7 +301,7 @@ function roteiroCriar(extra) {
   // 14. trava viva de outro saque (em curso) segura; vencida libera
   store.set('saque_trava/PX', { saqueId: 'SZ', incerto: false, em: Timestamp.now() });
   store.set('comissoes/c4', { parceiroUid: 'PX', valor: 15, pago: false, estornada: false, criadoEm: antes, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
-  store.set('saques/SE', { parceiroUid: 'PX', status: 'solicitado', valorSolicitado: 15, pedidoEm: Timestamp.now() });
+  store.set('saques/SE', { parceiroUid: 'PX', nfseChave: '11111111111111111111111111111111111111111111111111', status: 'solicitado', valorSolicitado: 15, pedidoEm: Timestamp.now() });
   r = await chamarSaque({ saqueId: 'SE', etapa: 'pagar' });
   conf(r.code === 409 && r.body.erro === 'outro_saque_em_curso', '14. outro saque em curso segura');
   store.get('saque_trava/PX').em = Timestamp.fromMillis(Date.now() - 11 * 60000);
@@ -309,10 +310,45 @@ function roteiroCriar(extra) {
   conf(r.code === 200 && r.body.valorPago === 15, '14. trava vencida (sem duvida) libera');
 
   // 15. aviso de transferencia do Asaas solta a trava do saque em duvida
-  store.set('saques/SF', { parceiroUid: 'PX', status: 'solicitado', valorSolicitado: 0, pedidoEm: Timestamp.now(), transferenciaId: 'tF' });
+  store.set('saques/SF', { parceiroUid: 'PX', nfseChave: '11111111111111111111111111111111111111111111111111', status: 'solicitado', valorSolicitado: 0, pedidoEm: Timestamp.now(), transferenciaId: 'tF' });
   store.set('saque_trava/PX', { saqueId: 'SF', incerto: true, em: Timestamp.now() });
   await wh.processarEvento({ event: 'TRANSFER_FAILED', transfer: { id: 'tF', status: 'FAILED', externalReference: 'SF' } }, { escopo: 'mae' });
   conf(!d('saque_trava/PX'), '15. TRANSFER_FAILED solta a trava');
+
+  // ===================== 16. PF: retencao e 1 pagamento por mes (22/10/2026) =====================
+  store.clear(); chamadas = [];
+  process.env.PF_DIA_PAGAMENTO = '1';
+  store.set('admins/ADM', { ok: true });
+  store.set('parceiros/PY', { status: 'aprovado', pix: 'py@teste.com', nome: 'Parceiro Y' });
+  const ant2 = Timestamp.fromMillis(Date.now() - 20 * DIA);
+  store.set('comissoes/y1', { parceiroUid: 'PY', valor: 100, pago: false, estornada: false, criadoEm: ant2, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
+  store.set('comissoes/y2', { parceiroUid: 'PY', valor: 200, pago: false, estornada: false, criadoEm: ant2, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
+  store.set('saques/SY', { parceiroUid: 'PY', status: 'solicitado', valorSolicitado: 300, pedidoEm: Timestamp.now() });
+  let valorPix = null;
+  roteiro = (p, m, c) => {
+    if (p.indexOf('/pix/addressKeys/external') === 0) return { name: 'Parceiro Y', cpfCnpj: '***.982.247-**' };
+    if (p === '/transfers' && m === 'POST') { valorPix = c.value; return { id: 't_' + c.externalReference, status: 'PENDING', authorized: true }; }
+    if (p.indexOf('/transfers?externalReference=') === 0) return { data: [] };
+    return {};
+  };
+  r = await chamarSaque({ saqueId: 'SY', etapa: 'pagar' });
+  conf(r.code === 409 && r.body.erro === 'sem_dados_fiscais', '16. sem dados para receber nao paga');
+  store.set('parceiros_fiscal/PY', { tipo: 'pf', documento: '52998224725', nome: 'Parceiro Y Silva', nascimento: '1990-01-01' });
+  r = await chamarSaque({ saqueId: 'SY', etapa: 'conferir' });
+  conf(r.code === 200 && r.body.retencao.inss === 33 && r.body.retencao.liquido === 267 && r.body.docConfere === true, '16. conferir mostra INSS 11% e liquido (' + JSON.stringify(r.body.retencao) + ')');
+  r = await chamarSaque({ saqueId: 'SY', etapa: 'pagar' });
+  conf(r.code === 200 && valorPix === 267 && d('saques/SY').valorBruto === 300 && d('saques/SY').inssRetido === 33 && d('saques/SY').valorPago === 267, '16. Pix sai pelo liquido e o saque guarda a retencao');
+  store.set('comissoes/y3', { parceiroUid: 'PY', valor: 50, pago: false, estornada: false, criadoEm: ant2, liberaEm: Timestamp.fromMillis(Date.now() - 10 * DIA) });
+  store.set('saques/SY2', { parceiroUid: 'PY', status: 'solicitado', valorSolicitado: 50, pedidoEm: Timestamp.now() });
+  r = await chamarSaque({ saqueId: 'SY2', etapa: 'pagar' });
+  conf(r.code === 409 && r.body.erro === 'pf_ja_recebeu_no_mes', '16. PF so recebe 1 vez por mes');
+  r = await chamarSaque({ saqueId: 'SY2', etapa: 'manual', valorConferido: 50 });
+  conf(r.code === 409 && r.body.erro === 'pf_ja_recebeu_no_mes', '16. nem registrando na mao');
+  // PJ sem nota
+  store.set('parceiros_fiscal/PY', { tipo: 'pj', documento: '11222333000181', nome: 'Parceiro Y ME' });
+  r = await chamarSaque({ saqueId: 'SY2', etapa: 'pagar' });
+  conf(r.code === 409 && r.body.erro === 'pj_sem_nota', '16. PJ sem chave da NFS-e nao paga');
+  delete process.env.PF_DIA_PAGAMENTO;
 
   console.log('\nOK ' + ok + ' / FALHAS ' + falhas);
   process.exit(falhas ? 1 : 0);
