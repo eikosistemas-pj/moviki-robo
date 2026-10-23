@@ -1,4 +1,5 @@
-// versao 2026-10-22-nfse (nota fiscal de servico de cada pagamento confirmado de receita do Moviki, lib/nfse.js, desligada ate as envs NFSE_*; eventos INVOICE_* atualizam a nota e avisam recusa)
+// versao 2026-10-23-gareserva (purchase vai ao GA4 tambem sem gaClientId, com id de reserva; lib/ga.js)
+// anterior: 2026-10-22-nfse (nota fiscal de servico de cada pagamento confirmado de receita do Moviki, lib/nfse.js, desligada ate as envs NFSE_*; eventos INVOICE_* atualizam a nota e avisam recusa)
 // anterior: 2026-10-17-carencia (lojista-parceiro em atraso: comissao retida por 30 dias e liberada se ele pagar; atrasoDesde no vencimento; estorno alcanca a retida)
 // anterior: 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)  | 06/10/2026 plano 2.6
 // anterior: 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
@@ -424,7 +425,7 @@ async function registrarPurchase(uid, plano, periodo, pay) {
     sid = f.gaSessionId || '';
   } catch (_) {}
 
-  await ga.purchase({ clientId: cid, sessionId: sid, transactionId: payId, value: valor, plano, periodo });
+  await ga.purchase({ clientId: cid, sessionId: sid, uid, transactionId: payId, value: valor, plano, periodo });
 
   // --- Meta (Conversions API) ---
   // Dados de correspondencia: e-mail vem do Auth (nao existe campo de e-mail em
