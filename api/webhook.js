@@ -1,4 +1,5 @@
-// versao 2026-10-17-carencia (lojista-parceiro em atraso: comissao retida por 30 dias e liberada se ele pagar; atrasoDesde no vencimento; estorno alcanca a retida)
+// versao 2026-10-22-nfse (nota fiscal de servico de cada pagamento confirmado de receita do Moviki, lib/nfse.js, desligada ate as envs NFSE_*; eventos INVOICE_* atualizam a nota e avisam recusa)
+// anterior: 2026-10-17-carencia (lojista-parceiro em atraso: comissao retida por 30 dias e liberada se ele pagar; atrasoDesde no vencimento; estorno alcanca a retida)
 // anterior: 2026-10-01-fundador (Lote Fundador: parcelas 12x ligam o plano uma vez; vaga confirmada no pagamento; comissao do lote retida 30 dias; comissao de cartao so libera depois do credito; B14: transferencia solta a trava do parceiro)  | 06/10/2026 plano 2.6
 // anterior: 2026-09-25-a2 (cobranca removida nao derruba plano pago; vencimento conta do vencimento da cobranca, nao da hora do aviso; o mesmo pagamento so liga o plano uma vez)
 // anterior: 2026-09-23-rodada3 (assinatura paga vira a atual; reembolso no teste volta ao teste; testeAte; indicacao anterior ao parceiro nao gera comissao; plano sai da assinatura paga; aviso de assinatura antiga nao derruba; consulta falha reprocessa)
@@ -18,6 +19,8 @@ const checkout = require('../lib/checkout');
 const { asaas } = require('../lib/asaas');
 // 17/10/2026: carencia de 30 dias do lojista-parceiro em atraso.
 const retida = require('../lib/comissaoRetida');
+// 22/10/2026: nota fiscal das mensalidades (desligada ate as envs NFSE_*).
+const nfse = require('../lib/nfse');
 
 /* ===========================================================================
    15/09/2026 — ESCOPO DO TOKEN E VALOR RECONFERIDO NO ASAAS
@@ -648,6 +651,19 @@ function idDoEvento(evento) {
 }
 
 // Aviso imediato ao dono. Nunca derruba o webhook.
+/* 22/10/2026: pagamento devolvido com nota fiscal emitida -> a nota precisa
+   ser cancelada (Curitiba: ate 60 dias, antes de pagar o imposto). Cancelar
+   nota e decisao fiscal: o robo so avisa. Nunca lanca. */
+async function avisarNotaDevolvida(payId) {
+  try {
+    const n = await db.collection('nfse').doc(String(payId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80)).get();
+    const d = n.exists ? (n.data() || {}) : {};
+    if (d.invoiceId) {
+      await avisarDono('🧾 Pagamento devolvido com nota fiscal emitida\n\nCobranca: ' + payId + '\nNota: ' + d.invoiceId + '\n\nCancele a nota no Asaas (Notas Fiscais) em ate 60 dias.');
+    }
+  } catch (_) {}
+}
+
 async function avisarDono(texto) {
   const TOKEN = process.env.TELEGRAM_TOKEN;
   const CHAT = process.env.TELEGRAM_CHAT_ID;
@@ -787,6 +803,13 @@ async function processarEvento(evento, ctx) {
      reconferidos no Asaas). */
   if (escopo === 'transfer') return { ok: true, recusado: 'escopo', escopo };
 
+  /* 22/10/2026: aviso de NOTA FISCAL (INVOICE_*). So a conta mae emite nota;
+     o token de subconta nunca fala disto. */
+  if (String(tipo || '').indexOf('INVOICE_') === 0) {
+    if (soPedido) return { ok: true, recusado: 'escopo', escopo, tratado: 'nota_fiscal' };
+    return await nfse.webhookNota(tipo, evento.invoice || {}, db, avisarDono);
+  }
+
   const pay = evento.payment || {};
   const uid = pay.externalReference; // gravamos o uid na assinatura -> volta aqui
 
@@ -830,6 +853,11 @@ async function processarEvento(evento, ctx) {
       ativo,
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
+    /* 22/10/2026: ponto extra pago e receita do Moviki -> nota fiscal. */
+    if (ativo) {
+      try { await nfse.emitirNotaDoPagamento({ asaas, db, admin, payId: pay.id, valor: pay.value, tipo: 'ponto', uid: null }); }
+      catch (ne) { console.error('nfse ponto erro:', ne); }
+    }
     return { ok: true, ponto: pid, ativo };
   }
 
@@ -895,6 +923,7 @@ async function processarEvento(evento, ctx) {
     try {
       if (tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') {
         await estornarComissoes(String(pay.id || ''));
+        await avisarNotaDevolvida(String(pay.id || ''));
       }
     } catch (ce) { console.error('estorno comissao erro:', ce); }
     return { ok: true, ignorado: 'assinatura_antiga', uid, tipo, sub: subPaga };
@@ -1050,6 +1079,13 @@ async function processarEvento(evento, ctx) {
     // GA4 + Meta: mede a venda (server-side, deduplicado). Nunca derruba o webhook.
     try { await registrarPurchase(uid, plano, periodo, payReal); }
     catch (ge) { console.error('purchase medicao erro:', ge); }
+
+    /* 22/10/2026: nota fiscal deste pagamento (receita do Moviki). Desligada
+       ate as envs NFSE_*; nunca derruba o webhook; nunca duplica. */
+    try {
+      const rn = await nfse.emitirNotaDoPagamento({ asaas, db, admin, payId: payReal.id, valor: payReal.value, plano, periodo, tipo: 'assinatura', uid });
+      if (rn && rn.erro) await avisarDono('🧾 Nota fiscal NAO foi agendada\n\nUid: ' + uid + '\nCobranca: ' + String(payReal.id || '') + '\nMotivo: ' + (rn.mensagem || rn.erro) + '\n\nEmita a nota a mao no Asaas (Cobrancas > a cobranca > Emitir nota).');
+    } catch (ne) { console.error('nfse erro:', ne); }
   } else {
     /* 25/09/2026 (A2): cobranca REMOVIDA nunca desliga. Cobranca removida e
        cobranca que nao foi paga: quem manda no fim do plano e o vence_em do
@@ -1105,6 +1141,7 @@ async function processarEvento(evento, ctx) {
     try {
       if (tipo === 'PAYMENT_REFUNDED' || tipo === 'PAYMENT_CHARGEBACK_REQUESTED') {
         await estornarComissoes(String(pay.id || ''));
+        await avisarNotaDevolvida(String(pay.id || ''));
       }
     } catch (ce) { console.error('estorno comissao erro:', ce); }
 
