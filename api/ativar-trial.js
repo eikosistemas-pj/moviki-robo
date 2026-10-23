@@ -1,4 +1,5 @@
-// versao 2026-10-14-provisorio (teste de 7 dias antes de confirmar o e-mail; confirmou, vira 30 dias contados do inicio)
+// versao 2026-10-23-provip (teste provisorio: no maximo 3 por rede (IP) a cada 24 h; acima disso so confirmando o e-mail)
+// anterior: 2026-10-14-provisorio (teste de 7 dias antes de confirmar o e-mail; confirmou, vira 30 dias contados do inicio)
 // anterior: 2026-09-25-pendente (clicar em Assinar antes de confirmar o e-mail nao queima mais o teste)
 // anterior: 2026-09-23-verificado (e-mail confirmado conferido no Firebase Auth, nao so no token)
 // POST /api/ativar-trial      (repo: moviki-robo · pasta: api/)
@@ -60,11 +61,18 @@
 
 const crypto = require('crypto');
 const { admin, db } = require('../lib/firebase');
+const { freioUid } = require('../lib/freio');
 
 const DIAS_TRIAL = 30;
 const DIAS_PROVISORIO = 7;      // teste antes de confirmar o e-mail (14/10/2026)
 const DIAS_MINIMO_CONFIRMOU = 7; // quem confirma tarde ainda leva pelo menos isso
 const DIA_MS = 86400000;
+// 23/10/2026 (Sentinela): o provisorio nao pede e-mail confirmado, entao
+// e-mail inventado dava 7 dias de Pro em serie. Teto por rede (hash do IP,
+// nunca o IP): acima dele a conta nao ganha provisorio e segue o caminho de
+// sempre (confirmar o e-mail e levar os 30 dias). Celular atras de CGNAT
+// divide IP; 3 por dia cobre o volume real com folga.
+const PROV_POR_IP_DIA = 3;
 
 // Provedores de caixa descartavel mais usados no Brasil. A env acrescenta.
 const DESCARTAVEIS_BASE = [
@@ -214,6 +222,16 @@ module.exports = async (req, res) => {
     const refUso = db.collection('trials_usados').doc(chave);
     const refProv = db.collection('trials_provisorios').doc(chave);
     const agora = Date.now();
+
+    // ---- TRAVA 4: provisorio por rede (23/10/2026) ----
+    if (!verificado && !eraProvisorio) {
+      const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+      if (ip) {
+        const ipH = crypto.createHash('sha256').update('mvk-prov|' + ip).digest('hex').slice(0, 32);
+        const pode = await freioUid(admin, db, 'trialprov', ipH, PROV_POR_IP_DIA, DIA_MS);
+        if (!pode) return res.status(200).json({ ok: true, pendenteVerificacao: true, motivo: 'provisorio_rede' });
+      }
+    }
 
     // Transacao: dois leitores simultaneos (duas abas, dois cliques) nao
     // conseguem conceder dois trials para o mesmo hash.
