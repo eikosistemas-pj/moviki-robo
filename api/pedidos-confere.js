@@ -1,4 +1,4 @@
-// versao 2026-10-03-segredo (CRON_SECRET em tempo constante; erro generico na resposta) | base 2026-09-30-estoque (varredura de pedidos + comprovantes + retencao + reservas de estoque vencidas)
+// versao 2026-10-22-marcocivil (+ varredura dos registros de acesso vencidos, 6 meses) | antes 2026-10-03-segredo (CRON_SECRET em tempo constante; erro generico na resposta) | base 2026-09-30-estoque (varredura de pedidos + comprovantes + retencao + reservas de estoque vencidas)
 // GET /api/pedidos-confere  (cron a cada 5 minutos, protegido por CRON_SECRET)
 //
 // Confere no Asaas os pedidos da live e do cardapio que ainda estao
@@ -13,6 +13,8 @@
 
 const checkout = require('../lib/checkout');
 const { bearerConfere } = require('../lib/segredo');
+const RA = require('../lib/registroAcesso');
+const { admin, db } = require('../lib/firebase');
 
 module.exports = async (req, res) => {
   try {
@@ -33,6 +35,10 @@ module.exports = async (req, res) => {
     /* 30/09/2026 (P53): reserva de estoque vencida devolve a peca; Pix
        direto abandonado vira 'expirado'. */
     try { r.reservas = await checkout.varrerReservas(150); } catch (e) { r.reservasErro = (e && e.message) || 'falha'; }
+    /* 22/10/2026 (Marco Civil art. 15): registro de acesso vencido (6 meses)
+       e apagado — guardar alem disso sem ordem judicial fere a LGPD. Segura a
+       si mesmo em 1 vez por hora. */
+    try { r.registrosAcesso = await RA.varrer(admin, db, 400); } catch (e) { r.registrosAcessoErro = (e && e.message) || 'falha'; }
     res.status(200).json(Object.assign({ ok: true }, r));
   } catch (e) {
     console.error('pedidos-confere erro:', e);

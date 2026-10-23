@@ -1,4 +1,9 @@
-// api/avaliacao.js | versao 2026-10-06-avalrobo  (repo: moviki-robo)
+// api/avaliacao.js | versao 2026-10-22-marcocivil | antes 2026-10-06-avalrobo  (repo: moviki-robo)
+//
+// 22/10/2026: avaliacao gravada deixa o registro de acesso do Marco Civil
+// (art. 15: IP completo, data e hora, 6 meses, sigilo) em registros_acesso,
+// pela lib/registroAcesso.js. O hash truncado continua sendo o unico rastro
+// dentro da propria avaliacao.
 //
 // AVALIACAO PASSA PELO ROBO (plano de seguranca 2.2, decidido pelo Paulo em
 // 06/10/2026: continua SEM login do cliente).
@@ -38,6 +43,7 @@ const { admin, db } = require('../lib/firebase');
 const { freioUid } = require('../lib/freio');
 const { conferirAdmin } = require('../lib/admin');
 const checkout = require('../lib/checkout');
+const RA = require('../lib/registroAcesso');
 
 const ORIGENS_OK = ['https://moviki.com.br', 'https://www.moviki.com.br', 'https://app.moviki.com.br'];
 const FV = admin.firestore.FieldValue;
@@ -122,6 +128,7 @@ async function criar(req, body) {
     if (rs.exists) tx.update(rsRef, { n: FV.increment(1), soma: FV.increment(nota), ultimaAv: avRef.id });
     else tx.set(rsRef, { n: 1, soma: nota, ultimaAv: avRef.id });
   });
+  await RA.registrar(admin, db, req, { app: 'avaliacao', evento: 'avaliacao', alvo: negocioUid });
   return { status: 200, corpo: { ok: true, id: avRef.id } };
 }
 
