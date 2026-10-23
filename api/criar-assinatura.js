@@ -1,4 +1,5 @@
-// versao 2026-10-01-fundador (Lote Fundador: vaga contada no servidor, cobranca no ato, 12x no cartao por cobranca parcelada)
+// versao 2026-10-22-cancelar (nova assinatura apaga a marca de renovacao cancelada pelo painel)
+// anterior: 2026-10-01-fundador (Lote Fundador: vaga contada no servidor, cobranca no ato, 12x no cartao por cobranca parcelada)
 // anterior: 2026-09-25-email (so assina com e-mail confirmado; teste gratis pode assinar; sem assinatura duplicada; trava de clique duplo)
 // POST /api/criar-assinatura
 // Chamado pelo painel quando o lojista escolhe um plano.
@@ -360,6 +361,7 @@ module.exports = async function criarAssinatura(req, res) {
       }, { merge: true });
       if (anteriorId) await cancelarAnterior(anteriorId, uid);
       if (fatSnap.exists && String(fatSnap.data().asaasParcelamentoAtual || '') !== inst) await cancelarParcelamentoPendente(fatSnap.data(), uid);
+      try { await db.collection('assinaturas').doc(uid).set({ renovacaoCancelada: admin.firestore.FieldValue.delete(), cancelamentoProtocolo: admin.firestore.FieldValue.delete(), desistenciaProtocolo: admin.firestore.FieldValue.delete() }, { merge: true }); } catch (_) {}
       try {
         const gaCid = gaClientId ? String(gaClientId).slice(0, 64) : '';
         const gaSid = gaSessionId ? String(gaSessionId).slice(0, 40) : '';
@@ -399,6 +401,9 @@ module.exports = async function criarAssinatura(req, res) {
     if (anteriorId && anteriorId !== assin.id) {
       await cancelarAnterior(anteriorId, uid);
     }
+    /* 22/10/2026: assinou de novo depois de cancelar pelo painel -> a marca de
+       renovacao cancelada sai (a tela volta a dizer "renova automaticamente"). */
+    try { await db.collection('assinaturas').doc(uid).set({ renovacaoCancelada: admin.firestore.FieldValue.delete(), cancelamentoProtocolo: admin.firestore.FieldValue.delete(), desistenciaProtocolo: admin.firestore.FieldValue.delete() }, { merge: true }); } catch (_) {}
     if (fatSnap.exists) await cancelarParcelamentoPendente(fatSnap.data(), uid);
 
     // GA4: guarda os ids da sessao do navegador (mandados pelo painel) pra
