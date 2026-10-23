@@ -205,7 +205,7 @@ module.exports = async (req, res) => {
 
     if (acao === 'status') {
       res.status(200).json({
-        ok: true, plano: sit.plano, periodo: sit.periodo, pago: sit.pago,
+        ok: true, plano: sit.plano, periodo: sit.periodo, pago: sit.pago, temAssinatura: sit.temAssinaturaAsaas,
         ate: dataBR(sit.venceEmMs), renovacaoCancelada: sit.renovacaoCancelada, protocolo: sit.protocolo,
         parcelado: sit.parcelado, fundador: sit.fundador,
         podeDesistir: sit.podeDesistir, desistirAte: dataBR(sit.desistirAteMs), desistenciaPedida: sit.desistenciaPedida,
