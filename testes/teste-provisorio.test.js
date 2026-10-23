@@ -28,8 +28,9 @@ let ok = 0, falhas = 0;
 function conf(c, msg) { if (c) ok++; else { falhas++; console.log('FALHOU:', msg); } }
 const DIA = 86400000;
 
-async function chamar(uid) {
+async function chamar(uid, ip) {
   const req = { method: 'POST', headers: { authorization: 'Bearer ' + uid, origin: 'https://app.moviki.com.br' } };
+  if (ip) req.headers['x-forwarded-for'] = ip + ', 10.0.0.1';
   let status = 0, corpo = null;
   const res = { setHeader() {}, status(s) { status = s; return this; }, json(j) { corpo = j; return this; }, end() { return this; } };
   await ativar(req, res);
@@ -133,6 +134,22 @@ const venceDias = (uid) => (assin(uid).vence_em.toMillis() - Date.now()) / DIA;
   conf(/amanhã/.test(m3.subject), 'c3 diz que acaba amanha');
   const mv = L.montarConfirmacao('c1', 'Loja', 'https://x', null, ag);
   conf(/Falta 1 passo/.test(mv.subject), 'sem provisorio, texto antigo');
+
+  // ---- 23/10/2026: no maximo 3 provisorios por rede a cada 24 h ----
+  for (let i = 1; i <= 3; i++) {
+    contas['ipConta' + i] = { email: 'inventado' + i + '@gmail.com', emailVerified: false };
+    const ri = await chamar('ipConta' + i, '200.1.2.3');
+    conf(ri.corpo.provisorio === true && ri.corpo.trial === true, 'provisorio ' + i + ' da mesma rede passa');
+  }
+  contas.ipConta4 = { email: 'inventado4@gmail.com', emailVerified: false };
+  let r4 = await chamar('ipConta4', '200.1.2.3');
+  conf(r4.corpo.pendenteVerificacao === true && r4.corpo.motivo === 'provisorio_rede' && !store.get('assinaturas/ipConta4'), '4o provisorio da mesma rede: so confirmando o e-mail');
+  r4 = await chamar('ipConta4', '200.9.9.9');
+  conf(r4.corpo.provisorio === true, 'outra rede ainda recebe');
+  contas.ipConta5 = { email: 'confirmada5@gmail.com', emailVerified: true };
+  const r5 = await chamar('ipConta5', '200.1.2.3');
+  conf(r5.corpo.trial === true && !r5.corpo.provisorio, 'e-mail confirmado na rede cheia leva os 30 dias');
+  conf(![...store.keys()].some(k => k.includes('200.1.2.3')), 'IP nunca gravado');
 
   console.log(falhas ? ('FALHAS ' + falhas + ' / OK ' + ok) : ('TUDO OK (' + ok + ' conferencias)'));
   process.exit(falhas ? 1 : 0);
